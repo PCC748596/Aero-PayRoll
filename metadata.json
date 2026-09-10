@@ -1,0 +1,5 @@
+{
+  "name": "AeroPayroll",
+  "description": "A comprehensive payroll and flight hour calculation system for aviation professionals, featuring automatic tax calculations and printable payslips.",
+  "requestFramePermissions": []
+}

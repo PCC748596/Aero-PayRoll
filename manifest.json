@@ -1,0 +1,30 @@
+
+{
+  "name": "AeroPayroll Manager",
+  "short_name": "AeroPayroll",
+  "description": "Sistema de gestão de folha de pagamento e horas de voo para aeronautas.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "./app-icon.svg?v=3",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "./app-icon.svg?v=3",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "./app-icon.svg?v=3",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
