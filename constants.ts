@@ -234,6 +234,7 @@ export const CCT_HISTORY_DATA: CCTConfigData[] = [
         internacional: { southAmerica: 21.00, northAmerica: 23.00, europe: 23.00, uk: 23.00, others: 21.00 }
     },
     valeAlimentacao: { value: 548.10, threshold: 0, payIndependently: true },
+    cctBreachFine: 150.48,
     fixedValues: {
         D_OPR: 15726.00, 
         D_SAFETY: 15726.00,
@@ -263,6 +264,7 @@ export const CCT_HISTORY_DATA: CCTConfigData[] = [
         internacional: { southAmerica: 21.00, northAmerica: 23.00, europe: 23.00, uk: 23.00, others: 21.00 }
     },
     valeAlimentacao: { value: 591.95, threshold: 0, payIndependently: true },
+    cctBreachFine: 157.52,
     fixedValues: {
         D_OPR: 16461.98, 
         D_SAFETY: 16461.98,
@@ -406,6 +408,12 @@ const CONFIG_2026: GlobalConfig = {
 
 export const INITIAL_CONFIG = CONFIG_2026;
 
+// Multa por descumprimento da CCT (R$ por competência em atraso)
+const DEFAULT_CCT_BREACH_FINE: Record<string, number> = {
+    cct_24_25: 150.48,
+    cct_25_26: 157.52,
+};
+
 // Helper to merge CCT History Data into GlobalConfig
 const applyCCTToConfig = (baseConfig: GlobalConfig, cct: CCTConfigData): GlobalConfig => {
     // Reverse calculate the Base (horaVooAnterior) needed to produce the Target Hourly Rate
@@ -433,6 +441,8 @@ const applyCCTToConfig = (baseConfig: GlobalConfig, cct: CCTConfigData): GlobalC
         otherCorrection: cct.otherCorrection,
         valeAlimentacao: cct.valeAlimentacao.value,
         valeAlimentacaoSeparate: cct.valeAlimentacao.payIndependently,
+        // Backups antigos têm cctHistory sem o campo: cai no valor padrão da CCT
+        cctBreachFine: cct.cctBreachFine ?? DEFAULT_CCT_BREACH_FINE[cct.id] ?? 0,
         salaryBase: {
             [Role.CMTE]: cct.salary.cmte,
             [Role.FO]: cct.salary.fo

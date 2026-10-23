@@ -110,6 +110,16 @@ const Payslip: React.FC<PayslipProps> = ({
       const empRaw = employees.find(e => e.id === initialData.employee.id) || initialData.employee;
       const currentYear = competenceDate.getFullYear();
       let sumGrossJanNov = 0, countJanNov = 0, sumGrossJanDec = 0, countJanDec = 0;
+      // Composição da média do 13º (por verba), para mostrar no contracheque de onde vem a média base
+      const compositionNov: Record<string, { total: number, quantity: number }> = {};
+      const compositionDec: Record<string, { total: number, quantity: number }> = {};
+      const addToComposition = (target: Record<string, { total: number, quantity: number }>, item: { description: string, total: number, quantity?: number }) => {
+          if (!item.total) return;
+          const desc = item.description.startsWith('Salário Base') ? 'Salário Base' : item.description;
+          if (!target[desc]) target[desc] = { total: 0, quantity: 0 };
+          target[desc].total += item.total;
+          target[desc].quantity += item.quantity || 0;
+      };
 
       for (let m = 0; m < 12; m++) {
           const mKey = `${currentYear}-${m}`;
@@ -131,11 +141,16 @@ const Payslip: React.FC<PayslipProps> = ({
               const { businessDays: hBusinessDays } = calculateBusinessDays(currentYear, m, ignoredHolidays, customHolidays);
               
               const hTotalDays = new Date(currentYear, m + 1, 0).getDate();
-              const hResult = calculatePayroll(empInMonth, hBusinessDays, hTotalDays, hConfig, hRates, hConfig.dsrMultiplier || 8, hDate, 'MONTHLY');
-              
+              // ignoreVacationDeduction: mês de férias entra cheio na média do 13º
+              const hResult = calculatePayroll(empInMonth, hBusinessDays, hTotalDays, hConfig, hRates, hConfig.dsrMultiplier || 8, hDate, 'MONTHLY', undefined, undefined, undefined, [], undefined, undefined, undefined, true);
+
               sumGrossJanDec += hResult.totals.gross;
               countJanDec++;
-              if (m <= 10) { sumGrossJanNov += hResult.totals.gross; countJanNov++; }
+              hResult.earnings.forEach(item => addToComposition(compositionDec, item));
+              if (m <= 10) {
+                  sumGrossJanNov += hResult.totals.gross; countJanNov++;
+                  hResult.earnings.forEach(item => addToComposition(compositionNov, item));
+              }
           }
       }
 
@@ -191,7 +206,8 @@ const Payslip: React.FC<PayslipProps> = ({
       }
 
       return { 
-          sumGrossJanNov, countJanNov, sumGrossJanDec, countJanDec, 
+          sumGrossJanNov, countJanNov, sumGrossJanDec, countJanDec,
+          compositionNov, compositionDec,
           first13rdAverage: countJanNov > 0 ? sumGrossJanNov / countJanNov : 0, 
           annualGrossAverage: countJanDec > 0 ? sumGrossJanDec / countJanDec : 0, 
           vacationVariableAverage: vacationTotalSum / 12, 
@@ -329,7 +345,9 @@ const Payslip: React.FC<PayslipProps> = ({
                   {activePayrollType === 'VACATION' ? (
                       <><span>INÍCIO FÉRIAS: {displayData.employee.vacationStartDate?.split('-').reverse().join('/')}</span><span>DIAS: {displayData.employee.vacationDays}</span></>
                   ) : activePayrollType === 'TERMINATION' ? (
-                      <><span>DATA DEMISSÃO: {displayData.employee.resignationDate?.split('-').reverse().join('/')}</span><span>AVISO: INDENIZADO</span></>
+                      <><span>DATA DEMISSÃO: {displayData.employee.resignationDate?.split('-').reverse().join('/')}</span><span>{(displayData.employee.terminationType || 'PEDIDO_TRABALHADO').replace(/_/g, ' ')}</span></>
+                  ) : (activePayrollType === '13_1ST' || activePayrollType === '13_2ND') ? (
+                      <span>13º SALÁRIO - REFERÊNCIA: ANO {paymentYear}</span>
                   ) : (<><span>DE: {startDateStr}</span><span>ATÉ: {endDateStr}</span></>)}
               </div>
               <div className="flex items-center gap-1 font-bold"><span>AeroPayroll Manager</span><Plane className="w-3 h-3 text-green-800" /></div>
@@ -376,13 +394,56 @@ const Payslip: React.FC<PayslipProps> = ({
                   <div className="col-span-2 px-3 py-1.5 print:py-0.5 text-right font-bold">{formatCurrency(item.total)}</div>
                 </div>
               ))}
+              {(activePayrollType === '13_1ST' || activePayrollType === '13_2ND') && (() => {
+                  const is1st = activePayrollType === '13_1ST';
+                  const composition = is1st ? calculationStats.compositionNov : calculationStats.compositionDec;
+                  const monthsCount = is1st ? calculationStats.countJanNov : calculationStats.countJanDec;
+                  const rows = Object.entries(composition);
+                  if (monthsCount === 0 || rows.length === 0) return null;
+                  return (
+                    <>
+                      <div className="grid grid-cols-12 bg-gray-200/60 border-y border-gray-300 text-[9px] font-bold uppercase mt-2">
+                        <div className="col-span-12 px-3 py-1 print:py-0.5">Composição da média base — {monthsCount} meses de {competenceDate.getFullYear()} (informativo, já incluído acima)</div>
+                      </div>
+                      <div className="grid grid-cols-12 text-[9px] font-bold uppercase text-gray-500 border-b border-gray-200">
+                        <div className="col-span-6 px-3 py-0.5">Verba</div>
+                        <div className="col-span-3 px-3 py-0.5 text-right">Total no período</div>
+                        <div className="col-span-1 px-3 py-0.5 text-center">Qtde méd.</div>
+                        <div className="col-span-2 px-3 py-0.5 text-right">Média mensal</div>
+                      </div>
+                      {rows.map(([desc, v]) => (
+                        <div key={`comp-${desc}`} className="grid grid-cols-12 border-b border-gray-100 text-gray-700">
+                          <div className="col-span-6 px-3 py-1 print:py-0.5 truncate uppercase">{desc}</div>
+                          <div className="col-span-3 px-3 py-1 print:py-0.5 text-right">{formatCurrency(v.total)}</div>
+                          <div className="col-span-1 px-3 py-1 print:py-0.5 text-center">{v.quantity ? (v.quantity / monthsCount).toFixed(2).replace('.', ',') : ''}</div>
+                          <div className="col-span-2 px-3 py-1 print:py-0.5 text-right font-semibold">{formatCurrency(v.total / monthsCount)}</div>
+                        </div>
+                      ))}
+                    </>
+                  );
+              })()}
+              {activePayrollType === 'TERMINATION' && displayData.nonTaxableEarnings.length > 0 && (
+                <>
+                  <div className="grid grid-cols-12 bg-gray-200/60 border-y border-gray-300 text-[9px] font-bold uppercase">
+                    <div className="col-span-12 px-3 py-1 print:py-0.5">Verbas indenizatórias (isentas de IRRF/INSS)</div>
+                  </div>
+                  {displayData.nonTaxableEarnings.map((item, idx) => (
+                    <div key={`nt-${idx}`} className="grid grid-cols-12 border-b border-gray-100">
+                      <div className="col-span-6 px-3 py-1.5 print:py-0.5 border-r border-gray-100 font-medium truncate uppercase">{item.description}</div>
+                      <div className="col-span-3 px-3 py-1.5 print:py-0.5 border-r border-gray-100"></div>
+                      <div className="col-span-1 px-3 py-1.5 print:py-0.5 border-r border-gray-100"></div>
+                      <div className="col-span-2 px-3 py-1.5 print:py-0.5 text-right font-bold">{formatCurrency(item.total)}</div>
+                    </div>
+                  ))}
+                </>
+              )}
             </div>
 
             <div className="mt-0 border-l border-r border-b border-black text-slate-950 text-xs print:text-[9px] bg-white/40">
                <div className="grid grid-cols-12 bg-gray-200/60 font-bold border-b border-black">
                  {/* ADJUSTED: Totals padding */}
-                 <div className="col-span-10 px-3 py-2 print:py-1 text-right border-r border-black uppercase">Total Vencimentos (Bruto):</div>
-                 <div className="col-span-2 px-3 py-2 print:py-1 text-right">{formatCurrency(displayData.totals.gross)}</div>
+                 <div className="col-span-10 px-3 py-2 print:py-1 text-right border-r border-black uppercase">{activePayrollType === 'TERMINATION' ? 'Total Geral de Verbas:' : 'Total Vencimentos (Bruto):'}</div>
+                 <div className="col-span-2 px-3 py-2 print:py-1 text-right">{formatCurrency(activePayrollType === 'TERMINATION' ? displayData.totals.gross + (displayData.totals.totalNonTaxable || 0) : displayData.totals.gross)}</div>
                </div>
                <div className="grid grid-cols-12 bg-red-800 text-white text-[10px] print:text-[9px] font-bold text-center border-b border-black uppercase">
                  <div className="col-span-10 py-1.5 print:py-0.5 border-r border-white/30">Descontos Legais</div><div className="col-span-2 py-1.5 print:py-0.5">Valor</div>
@@ -412,11 +473,11 @@ const Payslip: React.FC<PayslipProps> = ({
                  </div>
                )}
 
-               <div className="grid grid-cols-4 bg-gray-100/80 text-[9px] print:text-[8px] font-bold uppercase">
-                 <div className="p-2 border-r border-black"><div className="text-gray-500 text-[8px]">Base FGTS</div><div>{formatCurrency(displayData.totals.gross)}</div></div>
-                 <div className="p-2 border-r border-black"><div className="text-gray-500 text-[8px]">FGTS do Mês</div><div className="text-blue-700">{formatCurrency(displayData.totals.fgts)}</div></div>
-                 <div className="p-2 border-r border-black"><div className="text-gray-500 text-[8px]">Base IRRF</div><div>{formatCurrency(displayData.totals.gross - (displayData.deductions.find(d => d.description.includes('INSS'))?.total || 0))}</div></div>
-                 <div className="p-2"><div className="text-gray-500 text-[8px]">Base INSS</div><div>{formatCurrency(displayData.totals.gross)}</div></div>
+               <div className="grid grid-cols-4 bg-gray-100/80 text-sm print:text-[11px] font-bold uppercase">
+                 <div className="p-2 border-r border-black"><div className="text-gray-500 text-[11px] print:text-[9px]">Base FGTS</div><div>{formatCurrency(activePayrollType === '13_2ND' ? displayData.totals.gross - (displayData.deductions.find(d => d.description.includes('ADIANTAMENTO'))?.total || 0) : displayData.totals.gross)}</div></div>
+                 <div className="p-2 border-r border-black"><div className="text-gray-500 text-[11px] print:text-[9px]">FGTS do Mês</div><div className="text-blue-700">{formatCurrency(displayData.totals.fgts)}</div></div>
+                 <div className="p-2 border-r border-black"><div className="text-gray-500 text-[11px] print:text-[9px]">Base IRRF</div><div>{formatCurrency(activePayrollType === '13_1ST' ? 0 : displayData.totals.gross - (displayData.deductions.find(d => d.description.includes('INSS'))?.total || 0))}</div></div>
+                 <div className="p-2"><div className="text-gray-500 text-[11px] print:text-[9px]">Base INSS</div><div>{formatCurrency(activePayrollType === '13_1ST' ? 0 : displayData.totals.gross)}</div></div>
                </div>
             </div>
 

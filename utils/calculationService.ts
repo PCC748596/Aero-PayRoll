@@ -141,6 +141,53 @@ const calculateINSS = (value: number, table: TaxBracket[]): number => {
     return round2((value * lastBracket.rate) - lastBracket.deduction);
 };
 
+// Vale alimentação devido no mês de competência (mesma regra da folha: carência de 90 dias após a admissão, proporcional ao desligamento)
+export const calculateValeAlimentacaoDevido = (employee: Employee, config: GlobalConfig, competenceDate: Date): number => {
+    if (!config.valeAlimentacao || config.valeAlimentacao <= 0 || !employee.admissionDate) return 0;
+    const y = competenceDate.getFullYear();
+    const m = competenceDate.getMonth();
+    const [admY, admM, admD] = employee.admissionDate.split('-').map(Number);
+    const vestingDate = new Date(admY, admM - 1, admD + 90);
+    const monthStart = new Date(y, m, 1);
+
+    let days = 0;
+    if (monthStart > vestingDate) {
+        days = 30;
+    } else if (y === vestingDate.getFullYear() && m === vestingDate.getMonth()) {
+        const daysInMonth = new Date(y, m + 1, 0).getDate();
+        days = Math.min(30, Math.max(0, daysInMonth - vestingDate.getDate() + 1));
+    }
+
+    if (employee.resignationDate) {
+        const [resY, resM, resD] = employee.resignationDate.split('-').map(Number);
+        const monthIndex = y * 12 + m;
+        const resMonthIndex = resY * 12 + (resM - 1);
+        if (monthIndex > resMonthIndex) return 0;
+        if (monthIndex === resMonthIndex) days = Math.min(days, resD);
+    }
+
+    return round2((config.valeAlimentacao / 30) * days);
+};
+
+// Helper: IRRF com redutor da Lei 15.270/2025 (a partir de 01/2026)
+// base = rendimento tributável - INSS; grossIncome = rendimento tributável bruto (usado só no teto de isenção/redutor)
+const IR_REDUCTION_FIRST_YEAR = 2026;
+const calculateIRRF = (base: number, grossIncome: number, table: TaxBracket[], year: number): { tax: number, rate: number } => {
+    let bracket = table[0];
+    for (const b of table) { if (b.limit === null || base <= b.limit) { bracket = b; break; } }
+    let tax = base > 0 ? round2((base * bracket.rate) - bracket.deduction) : 0;
+
+    if (year >= IR_REDUCTION_FIRST_YEAR) {
+        if (grossIncome <= 5000) {
+            tax = 0;
+        } else if (grossIncome < 7350) {
+            const reduction = 978.62 - (0.133145 * grossIncome);
+            tax = Math.max(0, round2(tax - reduction));
+        }
+    }
+    return { tax, rate: bracket.rate };
+};
+
 export const calculatePayroll = (
   employee: Employee, 
   businessDays: number, 
@@ -156,7 +203,8 @@ export const calculatePayroll = (
   ignoredHolidays: string[] = [],
   vacationDetailedAverages?: { description: string, total: number, quantity: number }[],
   accumulatedFgtsBalance?: number,
-  previousMonthEmployee?: Employee // NEW: To sum variables from previous month in termination
+  previousMonthEmployee?: Employee, // NEW: To sum variables from previous month in termination
+  ignoreVacationDeduction: boolean = false // Médias de 13º: dias de férias contam como trabalhados, então o mês entra cheio
 ): PayrollResult => {
   
   let calculationDate = currentDate 
@@ -320,20 +368,33 @@ export const calculatePayroll = (
       let projectedDate = new Date(resignationDateObj);
       let noticeValue = 0;
       
-      if (terminationType === 'DEMISSAO_INDENIZADA') {
-          projectedDate.setDate(projectedDate.getDate() + finalNoticeDays);
-          noticeValue = round2((remunerationForIndemnity / 30) * finalNoticeDays);
-          nonTaxableEarnings.push({ description: `AVISO PRÉVIO INDENIZADO (${finalNoticeDays} DIAS)`, total: noticeValue });
+      const isJustaCausa = terminationType === 'JUSTA_CAUSA';
+      const isAcordo = terminationType === 'ACORDO_484A';
+      const hasIndemnifiedNotice = terminationType === 'DEMISSAO_INDENIZADA' || terminationType === 'RESCISAO_INDIRETA' || isAcordo;
+      // Art. 484-A I-a CLT: no acordo o aviso indenizado é pago pela metade (e a projeção acompanha)
+      const paidNoticeDays = isAcordo ? Math.ceil(finalNoticeDays / 2) : finalNoticeDays;
+
+      if (hasIndemnifiedNotice) {
+          projectedDate.setDate(projectedDate.getDate() + paidNoticeDays);
+          noticeValue = round2((remunerationForIndemnity / 30) * paidNoticeDays);
+          nonTaxableEarnings.push({ description: `AVISO PRÉVIO INDENIZADO (${paidNoticeDays} DIAS${isAcordo ? ' - 50% ART. 484-A' : ''})`, total: noticeValue });
       } else if (terminationType === 'PEDIDO_INDENIZADO') {
-          deductions.push({ description: `DESC. AVISO PRÉVIO (NÃO TRABALHADO)`, total: round2(fullBaseSalaryTerm) });
+          // Art. 487 §2º CLT: desconto = salários do prazo do aviso (remuneração, não só salário base)
+          deductions.push({ description: `DESC. AVISO PRÉVIO (NÃO TRABALHADO)`, total: round2(remunerationForIndemnity) });
       }
-      
-      const projectedDateStr = projectedDate.toISOString().split('T')[0];
-      const months13th = getMonthsWorkedInYear(resY, employee.admissionDate, projectedDateStr);
+
+      const fmtLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const projectedYear = projectedDate.getFullYear();
+      // Se a projeção do aviso cruza o ano, o 13º do ano da rescisão fecha em 31/12 e os avos do ano seguinte somam à parte
+      const months13thResYear = getMonthsWorkedInYear(resY, employee.admissionDate, projectedYear > resY ? `${resY}-12-31` : fmtLocal(projectedDate));
+      const months13thNextYear = projectedYear > resY ? getMonthsWorkedInYear(projectedYear, employee.admissionDate, fmtLocal(projectedDate)) : 0;
+      // Justa causa: perde 13º proporcional (Lei 4.090/62, art. 3º) e férias proporcionais (art. 146 par. único CLT)
+      const months13th = isJustaCausa ? 0 : months13thResYear + months13thNextYear;
       const prop13thValue = round2((remunerationForIndemnity / 12) * months13th);
-      
+
       if (months13th > 0) {
-        earnings.push({ description: `13º SALÁRIO PROPORCIONAL (${months13th}/12)${terminationType === 'DEMISSAO_INDENIZADA' ? ' C/ PROJEÇÃO' : ''}`, total: prop13thValue, isVariable: false });
+        const avosLabel = months13thNextYear > 0 ? `${months13thResYear}/12 + ${months13thNextYear}/12` : `${months13th}/12`;
+        earnings.push({ description: `13º SALÁRIO PROPORCIONAL (${avosLabel})${hasIndemnifiedNotice ? ' C/ PROJEÇÃO' : ''}`, total: prop13thValue, isVariable: false });
       }
 
       let currentPeriodStart = new Date(resY, admM - 1, admD);
@@ -353,13 +414,39 @@ export const calculatePayroll = (
           ptr.setMonth(ptr.getMonth() + 1);
       }
       if (vacMonths > 12) vacMonths = 12;
+      if (isJustaCausa) vacMonths = 0;
 
       const propVacationValue = round2((remunerationForIndemnity / 12) * vacMonths);
       const oneThirdVac = round2(propVacationValue / 3);
 
       if (vacMonths > 0) {
-        nonTaxableEarnings.push({ description: `FÉRIAS PROPORCIONAIS (${vacMonths}/12)${terminationType === 'DEMISSAO_INDENIZADA' ? ' C/ PROJEÇÃO' : ''}`, total: propVacationValue });
+        nonTaxableEarnings.push({ description: `FÉRIAS PROPORCIONAIS (${vacMonths}/12)${hasIndemnifiedNotice ? ' C/ PROJEÇÃO' : ''}`, total: propVacationValue });
         nonTaxableEarnings.push({ description: `1/3 FÉRIAS PROPORCIONAIS`, total: oneThirdVac });
+      }
+
+      // Férias vencidas: períodos aquisitivos completos cujos dias não constam no vacationHistory (art. 146 CLT)
+      // Passado o período concessivo (12 meses após o aquisitivo), paga em dobro (art. 137 CLT)
+      const [admYV, admMV, admDV] = employee.admissionDate.split('-').map(Number);
+      let vencidaPtr = new Date(admYV, admMV - 1, admDV);
+      let vencidaGuard = 0;
+      while (vencidaPtr < currentPeriodStart && vencidaGuard++ < 60) {
+          const periodStartStr = fmtLocal(vencidaPtr);
+          const daysTaken = (employee.vacationHistory || [])
+              .filter(v => v.periodStart === periodStartStr)
+              .reduce((acc, v) => acc + v.days, 0);
+          const daysOwed = Math.max(0, 30 - daysTaken);
+          if (daysOwed > 0) {
+              const concessiveEnd = new Date(vencidaPtr.getFullYear() + 2, vencidaPtr.getMonth(), vencidaPtr.getDate());
+              const isDouble = resignationDateObj >= concessiveEnd;
+              const periodLabel = `${periodStartStr.split('-').reverse().join('/')}`;
+              const baseVencida = round2((remunerationForIndemnity / 30) * daysOwed);
+              nonTaxableEarnings.push({ description: `FÉRIAS VENCIDAS (${daysOwed} DIAS - PERÍODO ${periodLabel})`, total: baseVencida });
+              nonTaxableEarnings.push({ description: `1/3 FÉRIAS VENCIDAS`, total: round2(baseVencida / 3) });
+              if (isDouble) {
+                  nonTaxableEarnings.push({ description: `DOBRA FÉRIAS VENCIDAS (ART. 137 CLT)`, total: round2(baseVencida + baseVencida / 3) });
+              }
+          }
+          vencidaPtr = new Date(vencidaPtr.getFullYear() + 1, vencidaPtr.getMonth(), vencidaPtr.getDate());
       }
       
       let inssSaldo = 0;
@@ -375,20 +462,17 @@ export const calculatePayroll = (
          deductions.push({ description: 'INSS S/ 13º SALÁRIO', total: inss13 });
       }
 
-      let baseIrSaldo = (proportionalBaseSalary + totalVariableEarnings + valDsr) - inssSaldo;
+      const grossSaldoTerm = proportionalBaseSalary + totalVariableEarnings + valDsr;
+      let baseIrSaldo = grossSaldoTerm - inssSaldo;
       if (baseIrSaldo > 0) {
-          let irBracket = config.irTable[0];
-          for (const bracket of config.irTable) { if (bracket.limit === null || baseIrSaldo <= bracket.limit) { irBracket = bracket; break; } }
-          const irTax = round2((baseIrSaldo * irBracket.rate) - irBracket.deduction);
-          if (irTax > 0) deductions.push({ description: 'IRRF S/ SALDO', total: irTax, rate: irBracket.rate });
+          const ir = calculateIRRF(baseIrSaldo, grossSaldoTerm, config.irTable, resY);
+          if (ir.tax > 0) deductions.push({ description: 'IRRF S/ SALDO', total: ir.tax, rate: ir.rate });
       }
 
       let baseIr13 = prop13thValue - inss13;
       if (baseIr13 > 0) {
-          let irBracket = config.irTable[0];
-          for (const bracket of config.irTable) { if (bracket.limit === null || baseIr13 <= bracket.limit) { irBracket = bracket; break; } }
-          const irTax = round2((baseIr13 * irBracket.rate) - irBracket.deduction);
-          if (irTax > 0) deductions.push({ description: 'IRRF S/ 13º SALÁRIO', total: irTax, rate: irBracket.rate });
+          const ir = calculateIRRF(baseIr13, prop13thValue, config.irTable, resY);
+          if (ir.tax > 0) deductions.push({ description: 'IRRF S/ 13º SALÁRIO', total: ir.tax, rate: ir.rate });
       }
 
       const totalTaxable = round2((proportionalBaseSalary + totalVariableEarnings + valDsr) + prop13thValue);
@@ -397,13 +481,17 @@ export const calculatePayroll = (
       const netValue = round2((totalTaxable + totalNonTaxable) - totalDeductions);
       
       let baseFgtsTerm = (proportionalBaseSalary + totalVariableEarnings + valDsr) + prop13thValue;
-      if (terminationType === 'DEMISSAO_INDENIZADA') baseFgtsTerm += noticeValue;
+      if (hasIndemnifiedNotice) baseFgtsTerm += noticeValue;
       const fgtsTerm = round2(baseFgtsTerm * 0.08);
+
+      // Multa rescisória sobre o saldo do FGTS: 40% (sem justa causa / indireta), 20% (acordo), 0% nos demais
+      const fgtsFineRate = (terminationType === 'DEMISSAO_INDENIZADA' || terminationType === 'DEMISSAO_TRABALHADA' || terminationType === 'RESCISAO_INDIRETA') ? 0.4 : isAcordo ? 0.2 : 0;
+      const fgtsFineValue = round2(((accumulatedFgtsBalance || 0) + fgtsTerm) * fgtsFineRate);
 
       return {
           employee: { ...employee, baseSalary: proportionalBaseSalary },
           earnings, deductions, nonTaxableEarnings,
-          totals: { gross: totalTaxable, net: netValue, totalDeductions, fgts: fgtsTerm, totalNonTaxable: totalNonTaxable, fgtsFine: round2((accumulatedFgtsBalance || 0 + fgtsTerm) * 0.4) },
+          totals: { gross: totalTaxable, net: netValue, totalDeductions, fgts: fgtsTerm, totalNonTaxable: totalNonTaxable, fgtsFine: fgtsFineValue },
           metadata: { businessDays: effectiveBusinessDays, dsrMultiplier: effectiveDsrDays, sundaysAndHolidays: 0, payrollType: 'TERMINATION', monthsWorked13th: months13th, terminationMeta: { noticeDays: finalNoticeDays, vacationVestingMonths: vacMonths } }
       };
   }
@@ -412,7 +500,7 @@ export const calculatePayroll = (
   let monthsWorked13th = getMonthsWorkedInYear(calculationDate.getFullYear(), employee.admissionDate, employee.resignationDate);
 
   let vacationDaysInCalculationMonth = 0;
-  if (payrollType === 'MONTHLY' && currentDate) {
+  if (payrollType === 'MONTHLY' && currentDate && !ignoreVacationDeduction) {
       if (employee.vacationStartDate) vacationDaysInCalculationMonth = getVacationDaysInMonth(employee.vacationStartDate, employee.vacationDays || 30, calculationDate, false);
       if (employee.vacationHistory) {
           employee.vacationHistory.forEach(rec => {
@@ -492,11 +580,9 @@ export const calculatePayroll = (
       const inss = calculateINSS(finalGross, config.inssTable);
       deductions.push({ description: 'INSS S/ FÉRIAS', total: inss });
       
-      const irBase = finalGross - inss; 
-      let irBracket = config.irTable[0];
-      for (const bracket of config.irTable) { if (bracket.limit === null || irBase <= bracket.limit) { irBracket = bracket; break; } }
-      const irTax = round2((irBase * irBracket.rate) - irBracket.deduction);
-      if (irTax > 0) deductions.push({ description: 'IRRF S/ FÉRIAS', total: irTax, rate: irBracket.rate });
+      const irBase = finalGross - inss;
+      const irVac = calculateIRRF(irBase, finalGross, config.irTable, calculationDate.getFullYear());
+      if (irVac.tax > 0) deductions.push({ description: 'IRRF S/ FÉRIAS', total: irVac.tax, rate: irVac.rate });
       return { employee: { ...employee, baseSalary: calculatedBaseSalary }, earnings, deductions, nonTaxableEarnings: [], totals: { gross: finalGross, net: round2(finalGross - (deductions.reduce((acc, curr) => acc + curr.total, 0))), totalDeductions: round2(deductions.reduce((acc, curr) => acc + curr.total, 0)), fgts: round2(finalGross * 0.08), totalNonTaxable: 0 }, metadata: { businessDays: 0, dsrMultiplier: 0, sundaysAndHolidays: 0, payrollType } };
   }
 
@@ -631,11 +717,8 @@ export const calculatePayroll = (
 
   if (payrollType !== '13_1ST') {
       const irBase = finalGross - inss;
-      let irBracket = config.irTable[0];
-      for (const b of config.irTable) { if (b.limit === null || irBase <= b.limit) { irBracket = b; break; } }
-      // FIX: Corrected variable name from 'bracket' to 'irBracket' to match declaration above
-      const irTax = round2((irBase * irBracket.rate) - irBracket.deduction);
-      if (irTax > 0) deductions.push({ description: payrollType === '13_2ND' ? 'IRRF S/ 13º' : 'IRRF', total: irTax, rate: irBracket.rate });
+      const irMonthly = calculateIRRF(irBase, finalGross, config.irTable, calculationDate.getFullYear());
+      if (irMonthly.tax > 0) deductions.push({ description: payrollType === '13_2ND' ? 'IRRF S/ 13º' : 'IRRF', total: irMonthly.tax, rate: irMonthly.rate });
   }
 
   const totalDeductions = round2(deductions.reduce((acc, curr) => acc + curr.total, 0));

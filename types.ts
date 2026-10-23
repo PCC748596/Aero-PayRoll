@@ -8,7 +8,7 @@ export type TriTreOption = 'NA' | 'TRI' | 'TRE';
 export type AdFuncaoOption = 'NA' | 'D.OPR' | 'D.SAFETY' | 'P.CHEFE' | 'G.KEEPER' | 'D.GERAL' | 'ACORDO';
 export type EquipamentoOption = 'A321' | 'A330' | 'ATR72';
 
-export type TerminationType = 'PEDIDO_TRABALHADO' | 'PEDIDO_INDENIZADO' | 'DEMISSAO_TRABALHADA' | 'DEMISSAO_INDENIZADA';
+export type TerminationType = 'PEDIDO_TRABALHADO' | 'PEDIDO_INDENIZADO' | 'DEMISSAO_TRABALHADA' | 'DEMISSAO_INDENIZADA' | 'JUSTA_CAUSA' | 'ACORDO_484A' | 'RESCISAO_INDIRETA' | 'TERMINO_CONTRATO';
 
 export type PayrollType = 'MONTHLY' | '13_1ST' | '13_2ND' | 'VACATION' | 'TERMINATION';
 
@@ -162,6 +162,9 @@ export interface CCTConfigData {
     payIndependently: boolean; // Paga independente do salário?
   };
 
+  // Multa fixa (R$) por descumprimento da CCT, por competência em atraso
+  cctBreachFine?: number;
+
   // Gratificações e Adicionais (Fixed Values per CCT)
   fixedValues: {
     D_OPR: number;
@@ -186,6 +189,7 @@ export interface GlobalConfig {
   otherCorrection: number;
   valeAlimentacao: number;
   valeAlimentacaoSeparate?: boolean; // New field to indicate if VA is paid separately (not in payroll)
+  cctBreachFine?: number; // Multa fixa por descumprimento da CCT (R$ por competência em atraso)
   horaVooAnterior: number;
   simuladorAnterior: number; // Novo campo
   horaSoloAnterior: number;  // Novo campo

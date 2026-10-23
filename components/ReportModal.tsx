@@ -119,7 +119,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                           const cConf = getConfigForDate(cDate, cctHistory);
                           const cRates = generateHourlyRates(cConf.horaVooAnterior, cConf.inpc+(cConf.otherCorrection||0), cConf.simuladorAnterior, cConf.horaSoloAnterior);
                           const cDays = calculateBusinessDays(y, i-1, ignoredHolidays, customHolidays);
-                          const res = calculatePayroll(hEmp, cDays.businessDays, cDays.totalDays, cConf, cRates, cConf.dsrMultiplier||8, cDate, 'MONTHLY');
+                          const res = calculatePayroll(hEmp, cDays.businessDays, cDays.totalDays, cConf, cRates, cConf.dsrMultiplier||8, cDate, 'MONTHLY', undefined, undefined, undefined, [], undefined, undefined, undefined, true); // mês de férias entra cheio na média
                           sum += res.totals.gross;
                           count++;
                       }

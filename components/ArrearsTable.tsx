@@ -1,7 +1,7 @@
 
 import React, { useMemo, useState } from 'react';
 import { Employee, Holiday, CCTConfigData } from '../types';
-import { calculatePayroll, calculateBusinessDays } from '../utils/calculationService';
+import { calculatePayroll, calculateBusinessDays, calculateValeAlimentacaoDevido } from '../utils/calculationService';
 import { generateHourlyRates, getConfigForDate, STANDARD_HOLIDAYS } from '../constants';
 import { AlertTriangle, Printer, FileText, CheckCircle, RotateCcw } from 'lucide-react';
 
@@ -11,6 +11,8 @@ interface ArrearsTableProps {
   arrearsMap: Record<string, number>; // Key: "empId_monthKey", Value: 0 | 10 | 20
   arrearsFgtsMap: Record<string, boolean>; // Key: "empId_monthKey", Value: boolean
   arrearsPaidMap: Record<string, boolean>; // Key: "empId_monthKey", Value: boolean
+  arrearsVaMap: Record<string, boolean>; // Key: "empId_monthKey", Value: VA (vale alimentação) em atraso
+  onUpdateArrearVa: (key: string, value: boolean) => void;
   onUpdateArrear: (key: string, value: number) => void;
   onUpdateArrearFgts: (key: string, value: boolean) => void;
   onUpdateArrearPaid: (key: string, value: boolean) => void;
@@ -20,6 +22,26 @@ interface ArrearsTableProps {
   cctHistory: CCTConfigData[]; // New Prop: Customized CCT History
   manualBusinessDays: number; // New Prop: Current Manual Business Days
 }
+
+// CCT dos Aeronautas: vale alimentação devido a toda a categoria a partir da competência DEZ/2024
+const VA_START_DATE = new Date(2024, 11, 1);
+
+// Linhas do cálculo da rescisão, usadas no detalhamento da impressão
+interface TerminationLines {
+    earnings: { description: string, total: number }[];
+    nonTaxable: { description: string, total: number }[];
+    deductions: { description: string, total: number }[];
+}
+
+// Rescisão cai na coluna do mês de pagamento = mês do desligamento + 2 (key "ano-mês-R")
+const isTerminationPaymentMonth = (emp: Employee, year: number, month: number): boolean => {
+    if (!emp.resignationDate) return false;
+    const [resY, resM] = emp.resignationDate.split('-').map(Number);
+    return resY * 12 + (resM - 1) + 2 === year * 12 + month;
+};
+
+// Sufixo da marcação extra da rescisão (guardada no mesmo mapa booleano do VA, chave "empId_mês-R:F40")
+const TERMINATION_EXTRA_FGTS40 = ':F40'; // Multa de 40% do FGTS não paga junto da rescisão
 
 const getActiveDaysInMonth = (year: number, month: number, admissionDate: string, resignationDate?: string): number => {
     const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -52,6 +74,8 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
   arrearsMap, 
   arrearsFgtsMap,
   arrearsPaidMap,
+  arrearsVaMap,
+  onUpdateArrearVa,
   onUpdateArrear,
   onUpdateArrearFgts,
   onUpdateArrearPaid,
@@ -70,6 +94,36 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
 
   const handlePrint = () => {
     window.print();
+  };
+
+  // Multa fixa por descumprimento da CCT vigente na competência da coluna (R$ 150,48 na CCT 24-25, R$ 157,52 na 25-26)
+  const getBreachValue = (key: string): number => {
+    const parts = key.split('-').map(p => (p === 'V' ? NaN : Number(p)));
+    let refDate: Date;
+    if (key.includes('-13-')) {
+        refDate = parts[2] === 1 ? new Date(parts[0], 10, 30) : new Date(parts[0], 11, 20);
+    } else if (key.endsWith('-V')) {
+        refDate = new Date(parts[0], parts[1], 1);
+    } else {
+        refDate = new Date(parts[0], parts[1] - 1, 1);
+    }
+    return getConfigForDate(refDate, cctHistory).cctBreachFine || 0;
+  };
+
+  // Marca como atrasado (multa) todas as competências de DEZ/24 em diante ainda sem marcação, por causa do VA da CCT
+  const handleMarkAllVaLate = (percentage: number) => {
+    displayedEmployees.forEach(emp => {
+      sortedMonths.forEach(mKey => {
+        if (mKey.includes('-13-') || mKey.endsWith('-V') || mKey.endsWith('-R')) return;
+        if (!isEligibleForMonth(emp, mKey)) return;
+        const [y, m] = mKey.split('-').map(Number);
+        if (new Date(y, m - 1, 1) < VA_START_DATE) return;
+        if (!(salariesData[mKey]?.[emp.id]?.va)) return;
+        const arrearKey = `${emp.id}_${mKey}`;
+        if (arrearsVaMap[arrearKey] === undefined) onUpdateArrearVa(arrearKey, true);
+        if (arrearsMap[arrearKey] === undefined) onUpdateArrear(arrearKey, percentage);
+      });
+    });
   };
 
   // 1. Agregar TODOS os funcionários únicos
@@ -123,6 +177,11 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
             keys.push(`${y}-${m}-V`);
         }
 
+        // Rescisão: acerto pago 2 meses após o desligamento (mesma regra da geração dos contracheques)
+        if (allEmployees.some(emp => isTerminationPaymentMonth(emp, y, m))) {
+            keys.push(`${y}-${m}-R`);
+        }
+
         // Inserir 13º após Novembro (1ª Parc) e Dezembro (2ª Parc)
         if (m === 10) { // Novembro
             keys.push(`${y}-13-1`);
@@ -134,12 +193,29 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
         ptr.setMonth(ptr.getMonth() + 1);
         safety++;
     }
-    
+
+    // Rescisões cujo mês de pagamento (desligamento + 2) é depois do mês selecionado também ganham coluna
+    const endAbs = end.getFullYear() * 12 + end.getMonth();
+    const startAbs = start.getFullYear() * 12 + start.getMonth();
+    allEmployees.forEach(emp => {
+        if (!emp.resignationDate) return;
+        const [resY, resM] = emp.resignationDate.split('-').map(Number);
+        const payAbs = resY * 12 + (resM - 1) + 2;
+        if (payAbs <= endAbs || payAbs < startAbs) return;
+        const key = `${Math.floor(payAbs / 12)}-${payAbs % 12}-R`;
+        if (!keys.includes(key)) keys.push(key);
+    });
+
     return keys;
   }, [currentDate, filterStartDate, allEmployees]);
 
   // 3. Função de Elegibilidade
   const isEligibleForMonth = (emp: Employee, key: string): boolean => {
+      if (key.endsWith('-R')) {
+          const [ry, rm] = key.split('-').map(Number);
+          return isTerminationPaymentMonth(emp, ry, rm);
+      }
+
       let currentMonthDate: Date;
 
       if (key.includes('-13-')) {
@@ -231,7 +307,13 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
         const ys = date.toLocaleString('pt-BR', { year: '2-digit' });
         return <span className="text-orange-200">FÉRIAS<br/><span className="text-[9px] opacity-75">{ms}{ys}</span></span>;
     }
-    const date = new Date(y, m - 1, 1); 
+    if (parts.length === 3 && parts[2] === 'R') {
+        const date = new Date(y, m - 1, 1);
+        const ms = date.toLocaleString('pt-BR', { month: 'short' }).toUpperCase().replace('.', '');
+        const ys = date.toLocaleString('pt-BR', { year: '2-digit' });
+        return <span className="text-rose-200">RESCISÃO<br/><span className="text-[9px] opacity-75">{ms}{ys}</span></span>;
+    }
+    const date = new Date(y, m - 1, 1);
     const ms = date.toLocaleString('pt-BR', { month: 'short' }).toUpperCase().replace('.', '');
     const ys = date.toLocaleString('pt-BR', { year: '2-digit' });
     return `H_${ms}${ys}`;
@@ -249,17 +331,30 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
           const date = new Date(y, m, 1);
           return `FÉRIAS - ${date.toLocaleString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase()}`;
       }
+      if (parts.length === 3 && parts[2] === 'R') {
+          const date = new Date(y, m - 1, 1);
+          return `RESCISÃO - ${date.toLocaleString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase()}`;
+      }
       const date = new Date(y, m - 1, 1);
       return date.toLocaleString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase();
   };
 
   // 5. CÁLCULO DOS VALORES BRUTOS E LÍQUIDOS (MENSAL + 13º)
   const salariesData = useMemo(() => {
-    const monthlyCache: Record<string, Record<string, { gross: number, net: number }>> = {};
-    const finalCache: Record<string, Record<string, { gross: number, net: number }>> = {};
+    const monthlyCache: Record<string, Record<string, { gross: number, net: number, va?: number, avgGross?: number, fgts?: number, fgtsBase?: number, fgtsRate?: number, termination?: TerminationLines }>> = {};
+    const finalCache: Record<string, Record<string, { gross: number, net: number, va?: number, avgGross?: number, fgts?: number, fgtsBase?: number, fgtsRate?: number, termination?: TerminationLines }>> = {};
 
     const yearsToCalc = new Set<number>();
     sortedMonths.forEach(k => yearsToCalc.add(parseInt(k.split('-')[0])));
+
+    // Rescisão: o saldo do FGTS acumulado precisa dos meses desde a admissão
+    allEmployees.forEach(emp => {
+        if (!emp.resignationDate || !emp.admissionDate) return;
+        if (!sortedMonths.some(k => k.endsWith('-R') && isEligibleForMonth(emp, k))) return;
+        const admYear = Number(emp.admissionDate.split('-')[0]);
+        const resYear = Number(emp.resignationDate.split('-')[0]);
+        for (let y = admYear; y <= resYear + 1; y++) yearsToCalc.add(y);
+    });
 
     const fullYearMonths: string[] = [];
     yearsToCalc.forEach(y => {
@@ -296,7 +391,7 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
         const daysInCompetenceMonth = totalDays; 
 
         const histList = isCurrentContextMonth ? employees : history[monthKey]; 
-        const monthMap: Record<string, { gross: number, net: number }> = {};
+        const monthMap: Record<string, { gross: number, net: number, va?: number, avgGross?: number, fgts?: number, fgtsBase?: number, fgtsRate?: number, termination?: TerminationLines }> = {};
 
         allEmployees.forEach(emp => {
             let empToCalc = histList?.find(h => h.id === emp.id);
@@ -312,7 +407,13 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                 }
             }
             const result = calculatePayroll(empToCalc, businessDays, daysInCompetenceMonth, config, hourlyRates, effectiveDsrMultiplier, competenceDate, 'MONTHLY');
-            monthMap[emp.id] = { gross: result.totals.gross, net: result.totals.net };
+            // VA pago à parte (não está na folha): entra como verba indenizatória, sem FGTS/INSS/IR
+            const va = (config.valeAlimentacaoSeparate && competenceDate >= VA_START_DATE)
+                ? calculateValeAlimentacaoDevido(empToCalc, config, competenceDate)
+                : 0;
+            // Média do 13º: mês de férias entra cheio (dias de férias contam como trabalhados)
+            const avgGross = calculatePayroll(empToCalc, businessDays, daysInCompetenceMonth, config, hourlyRates, effectiveDsrMultiplier, competenceDate, 'MONTHLY', undefined, undefined, undefined, [], undefined, undefined, undefined, true).totals.gross;
+            monthMap[emp.id] = { gross: result.totals.gross, net: result.totals.net, va, avgGross };
         });
         monthlyCache[monthKey] = monthMap;
     });
@@ -321,7 +422,7 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
         const parts = key.split('-');
         const y = Number(parts[0]);
         const m = Number(parts[1]);
-        const finalMap: Record<string, { gross: number, net: number }> = {};
+        const finalMap: Record<string, { gross: number, net: number, va?: number, avgGross?: number, fgts?: number, fgtsBase?: number, fgtsRate?: number, termination?: TerminationLines }> = {};
 
         if (parts.length === 3 && parts[1] === '13') {
             const p = Number(parts[2]);
@@ -346,7 +447,7 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
 
                 for (let i = 0; i <= limitMonth; i++) {
                     const mKey = `${y}-${i}`;
-                    const val = monthlyCache[mKey]?.[emp.id]?.gross || 0;
+                    const val = monthlyCache[mKey]?.[emp.id]?.avgGross ?? monthlyCache[mKey]?.[emp.id]?.gross ?? 0;
                     const activeDays = getActiveDaysInMonth(y, i, emp.admissionDate, emp.resignationDate);
 
                     if (val > 0 && activeDays >= 15) {
@@ -357,30 +458,30 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                 const avg = countMonths > 0 ? sumGross / countMonths : 0;
                 if (avg === 0) { finalMap[emp.id] = { gross: 0, net: 0 }; return; }
 
+                // 2ª parcela: o adiantamento descontado é o valor real da 1ª parcela
+                const gross1st = isSecond ? (finalCache[`${y}-13-1`]?.[emp.id]?.gross || 0) : 0;
+
                 const res = calculatePayroll(
-                    emp, 
-                    businessDays, 
-                    totalDays,    
-                    config, 
-                    hourlyRates, 
-                    effectiveDsrMultiplier, 
-                    refDate, 
+                    emp,
+                    businessDays,
+                    totalDays,
+                    config,
+                    hourlyRates,
+                    effectiveDsrMultiplier,
+                    refDate,
                     isSecond ? '13_2ND' : '13_1ST',
-                    undefined, 
-                    avg, 
-                    avg, 
+                    gross1st > 0 ? gross1st : undefined,
+                    avg,
+                    avg,
                     ignoredHolidays
                 );
-                
+
                 let grossValue = res.totals.gross;
-                let netValue = res.totals.net;
+                // O líquido da 2ª parcela já vem com o adiantamento, INSS e IRRF descontados pelo cálculo
+                const netValue = res.totals.net;
 
                 if (isSecond) {
-                    const key1st = `${y}-13-1`;
-                    const gross1st = finalCache[key1st]?.[emp.id]?.gross || 0;
-                    const net1st = finalCache[key1st]?.[emp.id]?.net || 0;
                     grossValue = Math.max(0, grossValue - gross1st);
-                    netValue = Math.max(0, netValue - net1st); // Aproximação do líquido da 2ª parcela
                 }
                 
                 finalMap[emp.id] = { gross: grossValue, net: netValue };
@@ -468,6 +569,75 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                 finalMap[emp.id] = { gross: result.totals.gross, net: result.totals.net };
             });
 
+        } else if (parts.length === 3 && parts[2] === 'R') {
+            // RESCISÃO: acerto calculado como no contracheque de rescisão (sem variáveis do mês anterior)
+            allEmployees.forEach(emp => {
+                if (!isEligibleForMonth(emp, key) || !emp.resignationDate) { finalMap[emp.id] = { gross: 0, net: 0 }; return; }
+
+                const [resY, resM] = emp.resignationDate.split('-').map(Number);
+                const resCompetence = new Date(resY, resM - 1, 1);
+                const config = getConfigForDate(resCompetence, cctHistory);
+                const hourlyRates = generateHourlyRates(config.horaVooAnterior, config.inpc + (config.otherCorrection || 0), config.simuladorAnterior, config.horaSoloAnterior);
+                const { businessDays: resBusinessDays, totalDays: resTotalDays } = calculateBusinessDays(resY, resM - 1, ignoredHolidays, customHolidays);
+
+                // Média anual do bruto (mês com 15+ dias ativos), igual à média usada no contracheque de rescisão
+                let sumGross = 0;
+                let countMonths = 0;
+                for (let i = 0; i < 12; i++) {
+                    const payKey = i + 1 > 11 ? `${resY + 1}-0` : `${resY}-${i + 1}`;
+                    const val = monthlyCache[payKey]?.[emp.id]?.avgGross ?? monthlyCache[payKey]?.[emp.id]?.gross ?? 0;
+                    if (val > 0 && getActiveDaysInMonth(resY, i, emp.admissionDate, emp.resignationDate) >= 15) {
+                        sumGross += val;
+                        countMonths++;
+                    }
+                }
+                const avg = countMonths > 0 ? sumGross / countMonths : 0;
+
+                // Saldo do FGTS acumulado = 8% do bruto de cada mês trabalhado antes do mês do desligamento
+                // + 8% dos 13º dos anos anteriores (mês de férias entra cheio; o 1/3 de férias não está incluído)
+                const [admY, admM] = emp.admissionDate.split('-').map(Number);
+                const resAbs = resY * 12 + (resM - 1);
+                const monthlyBase = (cy: number, cm: number): number => {
+                    const payKey = cm + 1 > 11 ? `${cy + 1}-0` : `${cy}-${cm + 1}`;
+                    return monthlyCache[payKey]?.[emp.id]?.avgGross ?? monthlyCache[payKey]?.[emp.id]?.gross ?? 0;
+                };
+                let accumulatedFgts = 0;
+                for (let abs = admY * 12 + (admM - 1); abs < resAbs; abs++) {
+                    accumulatedFgts += monthlyBase(Math.floor(abs / 12), abs % 12) * 0.08;
+                }
+                for (let py = admY; py < resY; py++) {
+                    let ySum = 0, yCount = 0;
+                    for (let pm = 0; pm < 12; pm++) {
+                        const v = monthlyBase(py, pm);
+                        if (v > 0 && getActiveDaysInMonth(py, pm, emp.admissionDate) >= 15) { ySum += v; yCount++; }
+                    }
+                    if (yCount > 0) accumulatedFgts += (ySum / 12) * 0.08; // média × avos ÷ 12 = soma ÷ 12
+                }
+
+                const snapshot = history[key]?.find(h => h.id === emp.id) || { ...emp, hours: { diurna:0, noturna:0, espDiurno:0, espNoturno:0, reDiurno:0, reNoturna:0, reEspDiurno:0, reEspNoturno:0, saDiurno:0, saNoturna:0, saEspDiurno:0, saEspNoturno:0, simulador:0, horaSolo:0 }, folgaDeslocada: 0 };
+                const employeeForTerm: Employee = { ...snapshot, resignationDate: emp.resignationDate, terminationType: emp.terminationType || snapshot.terminationType };
+
+                const res = calculatePayroll(
+                    employeeForTerm, resBusinessDays, resTotalDays, config, hourlyRates, config.dsrMultiplier || 8,
+                    resCompetence, 'TERMINATION', undefined, undefined, avg, ignoredHolidays, undefined, accumulatedFgts
+                );
+
+                finalMap[emp.id] = {
+                    gross: res.totals.gross + (res.totals.totalNonTaxable || 0), // total das verbas, base das multas
+                    net: res.totals.net,
+                    fgts: res.totals.fgts,
+                    // Base da multa do FGTS: saldo acumulado + FGTS da rescisão (encargos do FGTS em atraso entram depois)
+                    fgtsBase: accumulatedFgts + res.totals.fgts,
+                    fgtsRate: (['DEMISSAO_INDENIZADA', 'DEMISSAO_TRABALHADA', 'RESCISAO_INDIRETA'].includes(employeeForTerm.terminationType || '')) ? 0.4
+                        : employeeForTerm.terminationType === 'ACORDO_484A' ? 0.2 : 0,
+                    termination: {
+                        earnings: res.earnings.map(e => ({ description: e.description, total: e.total })),
+                        nonTaxable: res.nonTaxableEarnings.map(e => ({ description: e.description, total: e.total })),
+                        deductions: res.deductions.map(d => ({ description: d.description, total: d.total }))
+                    }
+                };
+            });
+
         } else {
             Object.assign(finalMap, monthlyCache[key] || {});
         }
@@ -478,14 +648,52 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
     return finalCache;
   }, [history, sortedMonths, allEmployees, ignoredHolidays, customHolidays, cctHistory, currentDate, employees, manualBusinessDays]);
 
+  // FGTS da competência: na rescisão vem do cálculo (inclui aviso indenizado), nas demais é 8% do bruto
+  const getFgtsValue = (mKey: string, empId: string, gross: number): number =>
+      salariesData[mKey]?.[empId]?.fgts ?? gross * 0.08;
+
+  // Encargos do FGTS em atraso (Lei 8.036/90, art. 22): multa de 5% se pago no mês do vencimento ou 10% a partir do mês seguinte
+  // + juros de mora de 0,5% ao mês ou fração, sobre os 8% de cada competência marcada com FGTS. A TR não está incluída.
+  // Vencimento do FGTS: dia 7 do mês seguinte à competência (13º: 1ª parcela em dez, 2ª em jan; férias: mês seguinte)
+  const getFgtsArrearsCharges = (empId: string): number => {
+      const now = new Date();
+      let charges = 0;
+      sortedMonths.forEach(k => {
+          if (k.endsWith('-R') || !arrearsFgtsMap[`${empId}_${k}`]) return;
+          const nominal = (salariesData[k]?.[empId]?.gross || 0) * 0.08;
+          if (nominal <= 0) return;
+          const [ky, km] = k.split('-').map(Number);
+          let due: Date;
+          if (k.includes('-13-')) due = km === 13 && k.endsWith('-2') ? new Date(ky + 1, 0, 7) : new Date(ky, 11, 7);
+          else if (k.endsWith('-V')) due = new Date(ky, km + 1, 7);
+          else due = new Date(ky, km, 7);
+          if (now <= due) return;
+          const monthsLate = Math.max(1, (now.getFullYear() - due.getFullYear()) * 12 + (now.getMonth() - due.getMonth()));
+          const sameMonth = now.getFullYear() === due.getFullYear() && now.getMonth() === due.getMonth();
+          charges += nominal * ((sameMonth ? 0.05 : 0.10) + 0.005 * monthsLate);
+      });
+      return charges;
+  };
+
+  // Multa extra da rescisão: 40% do FGTS sobre todos os depósitos (saldo acumulado + rescisão) mais os encargos dos atrasos, quando marcada
+  const getTerminationExtras = (mKey: string, empId: string, arrearKey: string) => {
+      if (!mKey.endsWith('-R')) return { fineFgts40: 0, total: 0 };
+      const cell = salariesData[mKey]?.[empId];
+      const fineBase = (cell?.fgtsBase || 0) + getFgtsArrearsCharges(empId);
+      const fineFgts40 = arrearsVaMap[`${arrearKey}${TERMINATION_EXTRA_FGTS40}`] ? fineBase * (cell?.fgtsRate || 0) : 0;
+      return { fineFgts40, total: fineFgts40 };
+  };
+
   // Calcular totais (PENDENTES e QUITADOS separadamente)
-  const employeeTotals: Record<string, { finePending: number; fgtsPending: number; finePaid: number; fgtsPaid: number; grossTotal: number; netTotal: number }> = useMemo(() => {
-    const totals: Record<string, { finePending: number; fgtsPending: number; finePaid: number; fgtsPaid: number; grossTotal: number; netTotal: number }> = {};
+  const employeeTotals: Record<string, { finePending: number; fgtsPending: number; finePaid: number; fgtsPaid: number; breachPending: number; breachPaid: number; grossTotal: number; netTotal: number }> = useMemo(() => {
+    const totals: Record<string, { finePending: number; fgtsPending: number; finePaid: number; fgtsPaid: number; breachPending: number; breachPaid: number; grossTotal: number; netTotal: number }> = {};
     displayedEmployees.forEach(emp => {
       let finePending = 0;
       let fgtsPending = 0;
       let finePaid = 0;
       let fgtsPaid = 0;
+      let breachPending = 0;
+      let breachPaid = 0;
       let grossTotal = 0;
       let netTotal = 0;
 
@@ -497,35 +705,46 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
         const isPaid = arrearsPaidMap[arrearKey] || false;
 
         const gross = salariesData[mKey]?.[emp.id]?.gross || 0;
-        const net = salariesData[mKey]?.[emp.id]?.net || 0;
-        
-        if (percentage > 0 || fgtsSelected) {
+        const vaSelected = arrearsVaMap[arrearKey] || false;
+        const va = vaSelected ? (salariesData[mKey]?.[emp.id]?.va || 0) : 0;
+        const net = (salariesData[mKey]?.[emp.id]?.net || 0) + va;
+
+        const extras = getTerminationExtras(mKey, emp.id, arrearKey);
+
+        // Qualquer item em atraso gera a multa fixa por descumprimento de CCT
+        const hasAnyItem = percentage > 0 || fgtsSelected || vaSelected || extras.total > 0;
+        const currentBreach = hasAnyItem ? getBreachValue(mKey) : 0;
+
+        if (hasAnyItem) {
             grossTotal += gross;
             netTotal += net;
         }
 
         let currentFine = 0;
-        let currentFgts = 0;
+        let currentFgts = extras.fineFgts40; // multa de 40% do FGTS da rescisão soma na coluna do FGTS
 
         if (percentage > 0) {
-          currentFine = gross * (percentage / 100);
+          // Multa incide sobre tudo que está em atraso, inclusive o VA
+          currentFine = (gross + va) * (percentage / 100);
         }
         if (fgtsSelected) {
-          currentFgts = gross * 0.08;
+          currentFgts += getFgtsValue(mKey, emp.id, gross);
         }
 
         if (isPaid) {
             finePaid += currentFine;
             fgtsPaid += currentFgts;
+            breachPaid += currentBreach;
         } else {
             finePending += currentFine;
             fgtsPending += currentFgts;
+            breachPending += currentBreach;
         }
       });
-      totals[emp.id] = { finePending, fgtsPending, finePaid, fgtsPaid, grossTotal, netTotal };
+      totals[emp.id] = { finePending, fgtsPending, finePaid, fgtsPaid, breachPending, breachPaid, grossTotal, netTotal };
     });
     return totals;
-  }, [displayedEmployees, sortedMonths, arrearsMap, arrearsFgtsMap, arrearsPaidMap, salariesData]);
+  }, [displayedEmployees, sortedMonths, arrearsMap, arrearsFgtsMap, arrearsVaMap, arrearsPaidMap, salariesData, cctHistory]);
 
   const selectedEmployees = useMemo(() => {
       return displayedEmployees.filter(emp => !unselectedForPrint.has(emp.id));
@@ -534,6 +753,7 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
   // Totais Gerais PENDENTES (Para exibição principal e impressão)
   const grandTotalFinePending = selectedEmployees.reduce((acc, emp) => acc + (employeeTotals[emp.id]?.finePending || 0), 0);
   const grandTotalFgtsPending = selectedEmployees.reduce((acc, emp) => acc + (employeeTotals[emp.id]?.fgtsPending || 0), 0);
+  const grandTotalBreachPending = selectedEmployees.reduce((acc, emp) => acc + (employeeTotals[emp.id]?.breachPending || 0), 0);
   const grandTotalGross = selectedEmployees.reduce((acc, emp) => acc + (employeeTotals[emp.id]?.grossTotal || 0), 0);
   const grandTotalNet = selectedEmployees.reduce((acc, emp) => acc + (employeeTotals[emp.id]?.netTotal || 0), 0);
 
@@ -564,6 +784,11 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                         >
                             <Printer className="w-3 h-3" /> Imprimir Relatório
                         </button>
+                        <div className="ml-4 flex items-center gap-1">
+                            <span className="text-[10px] text-gray-500 dark:text-slate-400 font-bold uppercase">VA DEZ/24+ atrasado:</span>
+                            <button type="button" onClick={() => handleMarkAllVaLate(10)} className="px-2 py-1 bg-yellow-500 hover:bg-yellow-600 text-white rounded text-[10px] font-bold">10%</button>
+                            <button type="button" onClick={() => handleMarkAllVaLate(20)} className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-[10px] font-bold">20%</button>
+                        </div>
                     </div>
                 </h3>
                 <p className="text-xs text-gray-600 dark:text-slate-400 mt-1">
@@ -578,6 +803,10 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                 <div>
                     <span className="text-[10px] text-gray-500 dark:text-slate-400 uppercase font-bold block">Total FGTS (A Pagar)</span>
                     <span className="text-xl font-black text-blue-600 dark:text-blue-400">{formatCurrency(grandTotalFgtsPending)}</span>
+                </div>
+                <div>
+                    <span className="text-[10px] text-gray-500 dark:text-slate-400 uppercase font-bold block">Total Descumprimento CCT</span>
+                    <span className="text-xl font-black text-purple-600 dark:text-purple-400">{formatCurrency(grandTotalBreachPending)}</span>
                 </div>
             </div>
         </div>
@@ -609,8 +838,9 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                         {sortedMonths.map(mKey => {
                             const is13th = mKey.includes('-13-');
                             const isVacation = mKey.endsWith('-V');
+                            const isTerminationCol = mKey.endsWith('-R');
                             return (
-                                <th key={mKey} className={`p-2 border-r border-slate-600 min-w-[160px] text-center ${is13th ? 'bg-indigo-900' : (isVacation ? 'bg-orange-900' : '')}`}>
+                                <th key={mKey} className={`p-2 border-r border-slate-600 min-w-[160px] text-center ${is13th ? 'bg-indigo-900' : (isVacation ? 'bg-orange-900' : (isTerminationCol ? 'bg-rose-900' : ''))}`}>
                                     {formatHeader(mKey)}
                                 </th>
                             );
@@ -622,7 +852,7 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                 </thead>
                 <tbody className="divide-y divide-gray-200 dark:divide-slate-800">
                     {displayedEmployees.map((emp, idx) => {
-                        const empTotal = employeeTotals[emp.id] || { finePending: 0, fgtsPending: 0, finePaid: 0, fgtsPaid: 0 };
+                        const empTotal = employeeTotals[emp.id] || { finePending: 0, fgtsPending: 0, finePaid: 0, fgtsPaid: 0, breachPending: 0, breachPaid: 0 };
                         return (
                         <tr key={emp.id} className={`${idx % 2 === 0 ? 'bg-white dark:bg-slate-900' : 'bg-gray-50 dark:bg-slate-800/50'} hover:bg-blue-50 dark:hover:bg-slate-800 transition-colors`}>
                             
@@ -656,29 +886,38 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                                 }
 
                                 const gross = salariesData[mKey]?.[emp.id]?.gross || 0;
-                                const net = salariesData[mKey]?.[emp.id]?.net || 0;
+                                const vaAvailable = salariesData[mKey]?.[emp.id]?.va || 0;
                                 const arrearKey = `${emp.id}_${mKey}`;
                                 const selected = arrearsMap[arrearKey] || 0;
                                 const isFgtsSelected = arrearsFgtsMap[arrearKey] || false;
+                                const isVaSelected = (arrearsVaMap[arrearKey] || false) && vaAvailable > 0;
                                 const isPaid = arrearsPaidMap[arrearKey] || false;
-                                
-                                const fineValue = gross * (selected / 100);
-                                const fgtsValue = isFgtsSelected ? (gross * 0.08) : 0;
+                                const va = isVaSelected ? vaAvailable : 0;
+                                const net = (salariesData[mKey]?.[emp.id]?.net || 0) + va;
+
+                                const isTermination = mKey.endsWith('-R');
+                                const cellData = salariesData[mKey]?.[emp.id];
+                                const extras = getTerminationExtras(mKey, emp.id, arrearKey);
+                                const fineValue = (gross + va) * (selected / 100);
+                                const fgtsValue = isFgtsSelected ? getFgtsValue(mKey, emp.id, gross) : 0;
                                 const is13th = mKey.includes('-13-');
                                 const isVacation = mKey.endsWith('-V');
-                                const hasDebt = selected > 0 || isFgtsSelected;
+                                const hasDebt = selected > 0 || isFgtsSelected || isVaSelected || extras.total > 0;
+                                const breachValue = getBreachValue(mKey);
 
                                 let cellBg = '';
                                 if (isPaid) cellBg = 'bg-emerald-100 dark:bg-emerald-900/30';
                                 else if (hasDebt) cellBg = 'bg-red-50 dark:bg-red-900/10';
                                 else if (isVacation) cellBg = 'bg-orange-50 dark:bg-orange-900/10';
                                 else if (is13th) cellBg = 'bg-indigo-50 dark:bg-indigo-900/10';
+                                else if (isTermination) cellBg = 'bg-rose-50 dark:bg-rose-900/10';
 
                                 return (
                                     <td key={mKey} className={`p-2 border-r border-gray-200 dark:border-slate-800 text-center align-top ${cellBg}`}>
                                         <div className="flex flex-col gap-2 items-center">
                                             <div className="flex flex-col items-center">
-                                                <div className="text-[10px] text-gray-400 dark:text-slate-500">Bruto: {formatCurrency(gross)}</div>
+                                                <div className="text-[10px] text-gray-400 dark:text-slate-500">{isTermination ? 'Total verbas' : 'Bruto'}: {formatCurrency(gross)}</div>
+                                                {va > 0 && <div className="text-[10px] font-semibold text-teal-600 dark:text-teal-400">VA: {formatCurrency(va)}</div>}
                                                 <div className="text-[10px] font-semibold text-slate-700 dark:text-slate-300">Líq: {formatCurrency(net)}</div>
                                             </div>
                                             
@@ -688,6 +927,8 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                                                     <div className="flex flex-col text-xs opacity-75">
                                                         {selected > 0 && <span className="font-bold text-emerald-700 dark:text-emerald-500">+ {formatCurrency(fineValue)}</span>}
                                                         {isFgtsSelected && <span className="font-medium text-emerald-600 dark:text-emerald-400 text-[10px]">FGTS: {formatCurrency(fgtsValue)}</span>}
+                                                        {extras.fineFgts40 > 0 && <span className="font-medium text-emerald-600 dark:text-emerald-400 text-[10px]">FGTS 40%: {formatCurrency(extras.fineFgts40)}</span>}
+                                                        {hasDebt && breachValue > 0 && <span className="font-medium text-emerald-600 dark:text-emerald-400 text-[10px]">CCT: {formatCurrency(breachValue)}</span>}
                                                     </div>
                                                     <button 
                                                         onClick={() => onUpdateArrearPaid(arrearKey, false)}
@@ -704,13 +945,26 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                                                         <button onClick={() => onUpdateArrear(arrearKey, 10)} className={`px-2 py-1 rounded text-[10px] font-bold ${selected === 10 ? 'bg-yellow-500 text-white shadow-sm' : 'text-gray-500 dark:text-slate-400 hover:text-yellow-600'}`}>10%</button>
                                                         <button onClick={() => onUpdateArrear(arrearKey, 20)} className={`px-2 py-1 rounded text-[10px] font-bold ${selected === 20 ? 'bg-red-600 text-white shadow-sm' : 'text-gray-500 dark:text-slate-400 hover:text-red-600'}`}>20%</button>
                                                         <button onClick={() => onUpdateArrearFgts(arrearKey, !isFgtsSelected)} className={`px-2 py-1 rounded text-[10px] font-bold ${isFgtsSelected ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-500 dark:text-slate-400 hover:text-blue-600'}`}>FGTS</button>
+                                                        {vaAvailable > 0 && (
+                                                            <button onClick={() => onUpdateArrearVa(arrearKey, !isVaSelected)} title={`Vale alimentação: ${formatCurrency(vaAvailable)}`} className={`px-2 py-1 rounded text-[10px] font-bold ${isVaSelected ? 'bg-teal-600 text-white shadow-sm' : 'text-gray-500 dark:text-slate-400 hover:text-teal-600'}`}>VA</button>
+                                                        )}
                                                     </div>
+                                                    {isTermination && (cellData?.fgtsRate || 0) > 0 && (
+                                                        <div className="flex bg-gray-200 dark:bg-slate-700 rounded p-0.5 gap-0.5">
+                                                            <button
+                                                                onClick={() => onUpdateArrearVa(`${arrearKey}${TERMINATION_EXTRA_FGTS40}`, !arrearsVaMap[`${arrearKey}${TERMINATION_EXTRA_FGTS40}`])}
+                                                                title={`Multa de ${((cellData?.fgtsRate || 0) * 100).toFixed(0)}% do FGTS: ${formatCurrency(((cellData?.fgtsBase || 0) + getFgtsArrearsCharges(emp.id)) * (cellData?.fgtsRate || 0))} (8% dos brutos de cada mês + FGTS da rescisão + encargos dos atrasos)`}
+                                                                className={`px-2 py-1 rounded text-[10px] font-bold ${extras.fineFgts40 > 0 ? 'bg-rose-600 text-white shadow-sm' : 'text-gray-500 dark:text-slate-400 hover:text-rose-600'}`}>FGTS 40%</button>
+                                                        </div>
+                                                    )}
                                                     {hasDebt && (
                                                         <div className="flex flex-col text-xs mt-1 w-full">
                                                             {selected > 0 && <span className="font-bold text-red-600 dark:text-red-400">+ {formatCurrency(fineValue)}</span>}
+                                                            {extras.fineFgts40 > 0 && <span className="font-medium text-blue-600 dark:text-blue-400 text-[10px]">FGTS 40%: {formatCurrency(extras.fineFgts40)}</span>}
                                                             {isFgtsSelected && <span className="font-medium text-blue-600 dark:text-blue-400 text-[10px]">FGTS: {formatCurrency(fgtsValue)}</span>}
-                                                            
-                                                            <button 
+                                                            {breachValue > 0 && <span className="font-medium text-purple-600 dark:text-purple-400 text-[10px]">CCT: {formatCurrency(breachValue)}</span>}
+
+                                                            <button
                                                                 onClick={() => onUpdateArrearPaid(arrearKey, true)}
                                                                 className="mt-2 w-full py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold shadow-sm flex items-center justify-center gap-1 transition-all active:scale-95"
                                                                 title="Dar Baixa (Quitar)"
@@ -736,14 +990,18 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                                         <span>FGTS:</span>
                                         <span className="font-bold text-blue-600 dark:text-blue-400">{formatCurrency(empTotal.fgtsPending)}</span>
                                     </div>
+                                    <div className="flex justify-between w-full text-[10px] text-gray-500 dark:text-slate-400">
+                                        <span>CCT:</span>
+                                        <span className="font-bold text-purple-600 dark:text-purple-400">{formatCurrency(empTotal.breachPending)}</span>
+                                    </div>
                                     <div className="w-full h-px bg-gray-200 dark:bg-slate-700 my-0.5"></div>
                                     <div className="font-black text-slate-950 dark:text-white text-sm">
-                                        {formatCurrency(empTotal.finePending + empTotal.fgtsPending)}
+                                        {formatCurrency(empTotal.finePending + empTotal.fgtsPending + empTotal.breachPending)}
                                     </div>
                                     {/* Optional: Show Paid amount for reference */}
-                                    {(empTotal.finePaid + empTotal.fgtsPaid) > 0 && (
+                                    {(empTotal.finePaid + empTotal.fgtsPaid + empTotal.breachPaid) > 0 && (
                                         <div className="mt-2 pt-2 border-t border-dashed border-gray-300 w-full text-[9px] text-emerald-600 dark:text-emerald-500 text-right">
-                                            Quitado: {formatCurrency(empTotal.finePaid + empTotal.fgtsPaid)}
+                                            Quitado: {formatCurrency(empTotal.finePaid + empTotal.fgtsPaid + empTotal.breachPaid)}
                                         </div>
                                     )}
                                 </div>
@@ -758,6 +1016,8 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
 
     {/* Impressão */}
     <div id="arrears-printable" className="hidden print:block w-full bg-white text-black p-8 font-sans">
+        {/* Tabela de cada tripulante pode quebrar entre páginas (evita página em branco antes do 1º nome); linhas e cabeçalho do nome não se partem */}
+        <style>{`@media print { #arrears-printable tr { break-inside: avoid; } #arrears-printable thead { display: table-header-group; } #arrears-printable .emp-name { break-after: avoid; } }`}</style>
         <div className="text-center border-b-2 border-black pb-4 mb-6">
             <h1 className="text-2xl font-bold uppercase">Relatório de Cálculo de Atrasados</h1>
             <p className="text-sm text-gray-600">Referência: CCT 24-25 / CCT 25-26 (Multas + FGTS)</p>
@@ -767,12 +1027,12 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
             {selectedEmployees.map((emp) => {
                 const totalEmp = employeeTotals[emp.id];
                 // Show if there is ANY activity (Pending OR Paid)
-                const hasActivity = (totalEmp.finePending + totalEmp.fgtsPending + totalEmp.finePaid + totalEmp.fgtsPaid) > 0;
+                const hasActivity = (totalEmp.finePending + totalEmp.fgtsPending + totalEmp.finePaid + totalEmp.fgtsPaid + totalEmp.breachPending + totalEmp.breachPaid + totalEmp.netTotal) > 0;
                 if (!totalEmp || !hasActivity) return null;
                 
                 return (
-                    <div key={emp.id} className="break-inside-avoid border border-gray-300 rounded p-4 shadow-sm mb-4">
-                        <div className="flex justify-between items-center mb-3 bg-gray-100 p-2 rounded">
+                    <div key={emp.id} className="border border-gray-300 rounded p-4 shadow-sm mb-4">
+                        <div className="emp-name flex justify-between items-center mb-3 bg-gray-100 p-2 rounded">
                             <span className="font-bold text-lg uppercase">{emp.name}</span>
                             <span className="text-sm font-semibold">{emp.role}</span>
                         </div>
@@ -782,9 +1042,11 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                                     <th className="py-1 px-2">Competência</th>
                                     <th className="py-1 px-2 text-right">Base Bruta</th>
                                     <th className="py-1 px-2 text-right">Base Líquida</th>
-                                    <th className="py-1 px-2 text-center">Status</th>
+                                    <th className="py-1 px-2 text-center">5.1 CCT</th>
                                     <th className="py-1 px-2 text-right">Valor Multa</th>
-                                    <th className="py-1 px-2 text-right">FGTS (8%)</th>
+                                    <th className="py-1 px-2 text-right">2.4 CCT</th>
+                                    <th className="py-1 px-2 text-right">5.3 CCT</th>
+                                    <th className="py-1 px-2 text-right">FGTS (8% + multa 40%)</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -793,20 +1055,26 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                                     const percentage = arrearsMap[arrearKey] || 0;
                                     const fgtsSelected = arrearsFgtsMap[arrearKey] || false;
                                     const isPaid = arrearsPaidMap[arrearKey] || false;
+                                    const vaSelectedPrint = arrearsVaMap[arrearKey] || false;
 
-                                    if (percentage === 0 && !fgtsSelected) return null;
-                                    
+                                    const extrasPrint = getTerminationExtras(mKey, emp.id, arrearKey);
+
+                                    if (percentage === 0 && !fgtsSelected && !vaSelectedPrint && extrasPrint.total === 0) return null;
+
                                     const gross = salariesData[mKey]?.[emp.id]?.gross || 0;
-                                    const net = salariesData[mKey]?.[emp.id]?.net || 0;
-                                    const fineValue = gross * (percentage / 100);
-                                    const fgtsValue = fgtsSelected ? (gross * 0.08) : 0;
+                                    const vaPrint = vaSelectedPrint ? (salariesData[mKey]?.[emp.id]?.va || 0) : 0;
+                                    const net = (salariesData[mKey]?.[emp.id]?.net || 0) + vaPrint;
+                                    const fineValue = (gross + vaPrint) * (percentage / 100);
+                                    const fgtsValue = fgtsSelected ? getFgtsValue(mKey, emp.id, gross) : 0;
                                     const is13th = mKey.includes('-13-');
                                     const isVacation = mKey.endsWith('-V');
-                                    
+                                    const isTerminationRow = mKey.endsWith('-R');
+
                                     let rowBg = isPaid ? 'bg-emerald-50' : '';
                                     if (!isPaid) {
                                         if (isVacation) rowBg = 'bg-orange-50';
                                         else if (is13th) rowBg = 'bg-indigo-50';
+                                        else if (isTerminationRow) rowBg = 'bg-rose-50';
                                     }
                                     
                                     return (
@@ -817,8 +1085,15 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                                             <td className="py-1 px-2 text-center font-bold">
                                                 {isPaid ? <span className="text-emerald-700 text-xs border border-emerald-500 px-1 rounded">QUITADO</span> : (percentage > 0 ? `${percentage}%` : '-')}
                                             </td>
-                                            <td className={`py-1 px-2 text-right font-bold ${isPaid ? 'text-gray-400 line-through' : 'text-red-700'}`}>{fineValue > 0 ? formatCurrency(fineValue) : '-'}</td>
-                                            <td className={`py-1 px-2 text-right font-bold ${isPaid ? 'text-gray-400 line-through' : 'text-blue-700'}`}>{fgtsValue > 0 ? formatCurrency(fgtsValue) : '-'}</td>
+                                            <td className={`py-1 px-2 text-right font-bold ${isPaid ? 'text-gray-400 line-through' : 'text-red-700'}`}>
+                                                {fineValue > 0 ? formatCurrency(fineValue) : '-'}
+                                            </td>
+                                            <td className={`py-1 px-2 text-right font-bold ${isPaid ? 'text-gray-400 line-through' : 'text-teal-700'}`}>{vaPrint > 0 ? formatCurrency(vaPrint) : '-'}</td>
+                                            <td className={`py-1 px-2 text-right font-bold ${isPaid ? 'text-gray-400 line-through' : 'text-purple-700'}`}>{getBreachValue(mKey) > 0 ? formatCurrency(getBreachValue(mKey)) : '-'}</td>
+                                            <td className={`py-1 px-2 text-right font-bold ${isPaid ? 'text-gray-400 line-through' : 'text-blue-700'}`}>
+                                                {(fgtsValue + extrasPrint.fineFgts40) > 0 ? formatCurrency(fgtsValue + extrasPrint.fineFgts40) : '-'}
+                                                {extrasPrint.fineFgts40 > 0 && <div className="text-[9px] font-normal">inclui FGTS 40%: {formatCurrency(extrasPrint.fineFgts40)}</div>}
+                                            </td>
                                         </tr>
                                     );
                                 })}
@@ -830,21 +1105,69 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                                     <td className="py-2 px-2 text-right font-black">{formatCurrency(totalEmp.netTotal)}</td>
                                     <td className="py-2 px-2 text-center">-</td>
                                     <td className="py-2 px-2 text-right font-black">{formatCurrency(totalEmp.finePending)}</td>
+                                    <td className="py-2 px-2 text-right font-black">{formatCurrency(sortedMonths.reduce((acc, mKey) => (arrearsVaMap[`${emp.id}_${mKey}`] && isEligibleForMonth(emp, mKey)) ? acc + (salariesData[mKey]?.[emp.id]?.va || 0) : acc, 0))}</td>
+                                    <td className="py-2 px-2 text-right font-black">{formatCurrency(totalEmp.breachPending)}</td>
                                     <td className="py-2 px-2 text-right font-black">{formatCurrency(totalEmp.fgtsPending)}</td>
                                 </tr>
-                                {(totalEmp.finePaid + totalEmp.fgtsPaid) > 0 && (
+                                {(totalEmp.finePaid + totalEmp.fgtsPaid + totalEmp.breachPaid) > 0 && (
                                     <tr className="text-emerald-700">
                                         <td colSpan={4} className="py-1 px-2 text-right font-bold uppercase text-xs">Total Quitado:</td>
                                         <td className="py-1 px-2 text-right font-bold text-xs">{formatCurrency(totalEmp.finePaid)}</td>
+                                        <td className="py-1 px-2"></td>
+                                        <td className="py-1 px-2 text-right font-bold text-xs">{formatCurrency(totalEmp.breachPaid)}</td>
                                         <td className="py-1 px-2 text-right font-bold text-xs">{formatCurrency(totalEmp.fgtsPaid)}</td>
                                     </tr>
                                 )}
                                 <tr className="bg-gray-50">
-                                    <td colSpan={5} className="py-2 px-2 text-right font-bold uppercase">Total Geral Devido:</td>
-                                    <td className="py-2 px-2 text-right font-black text-lg">{formatCurrency(totalEmp.netTotal + totalEmp.finePending + totalEmp.fgtsPending)}</td>
+                                    <td colSpan={7} className="py-2 px-2 text-right font-bold uppercase">Total Geral Devido:</td>
+                                    <td className="py-2 px-2 text-right font-black text-lg">{formatCurrency(totalEmp.netTotal + totalEmp.finePending + totalEmp.fgtsPending + totalEmp.breachPending)}</td>
                                 </tr>
                             </tfoot>
                         </table>
+
+                        {/* Detalhamento da rescisão em atraso: verbas, descontos e o que é devido pelo atraso */}
+                        {sortedMonths.filter(k => k.endsWith('-R')).map(mKey => {
+                            const cell = salariesData[mKey]?.[emp.id];
+                            if (!cell?.termination || !isEligibleForMonth(emp, mKey)) return null;
+                            const arrearKey = `${emp.id}_${mKey}`;
+                            const percentage = arrearsMap[arrearKey] || 0;
+                            const fgtsSelected = arrearsFgtsMap[arrearKey] || false;
+                            const extras = getTerminationExtras(mKey, emp.id, arrearKey);
+                            if (percentage === 0 && !fgtsSelected && extras.total === 0) return null;
+
+                            const isPaid = arrearsPaidMap[arrearKey] || false;
+                            const fineValue = cell.gross * (percentage / 100);
+                            const fgtsValue = fgtsSelected ? getFgtsValue(mKey, emp.id, cell.gross) : 0;
+                            const breach = getBreachValue(mKey);
+                            const totalLate = fineValue + extras.total + fgtsValue + breach;
+
+                            return (
+                                <div key={`term-${mKey}`} className="mt-4 break-inside-avoid border border-rose-300 rounded p-3 bg-rose-50/40">
+                                    <div className="font-bold uppercase text-sm mb-2">{getMonthName(mKey)} — Verbas rescisórias {isPaid && <span className="text-emerald-700 text-xs border border-emerald-500 px-1 rounded ml-2">QUITADO</span>}</div>
+                                    <table className="w-full text-xs border-collapse">
+                                        <tbody>
+                                            {cell.termination.earnings.map((e, i) => (
+                                                <tr key={`e-${i}`} className="border-b border-gray-100"><td className="py-0.5 px-2 uppercase">{e.description}</td><td className="py-0.5 px-2 text-right">{formatCurrency(e.total)}</td></tr>
+                                            ))}
+                                            {cell.termination.nonTaxable.map((e, i) => (
+                                                <tr key={`n-${i}`} className="border-b border-gray-100"><td className="py-0.5 px-2 uppercase">{e.description} <span className="text-[9px] text-gray-500">(indenizatória)</span></td><td className="py-0.5 px-2 text-right">{formatCurrency(e.total)}</td></tr>
+                                            ))}
+                                            <tr className="font-bold bg-gray-100"><td className="py-1 px-2 uppercase">Total das verbas</td><td className="py-1 px-2 text-right">{formatCurrency(cell.gross)}</td></tr>
+                                            {cell.termination.deductions.map((d, i) => (
+                                                <tr key={`d-${i}`} className="border-b border-gray-100 text-red-700"><td className="py-0.5 px-2 uppercase">(-) {d.description}</td><td className="py-0.5 px-2 text-right">{formatCurrency(d.total)}</td></tr>
+                                            ))}
+                                            <tr className="font-black bg-gray-100"><td className="py-1 px-2 uppercase">Líquido da rescisão</td><td className="py-1 px-2 text-right">{formatCurrency(cell.net)}</td></tr>
+                                            <tr><td colSpan={2} className="pt-2 px-2 font-bold uppercase text-[10px] text-rose-800">Devido pelo atraso</td></tr>
+                                            {percentage > 0 && <tr><td className="py-0.5 px-2 uppercase">Multa CCT {percentage}% s/ total das verbas</td><td className="py-0.5 px-2 text-right font-bold text-red-700">{formatCurrency(fineValue)}</td></tr>}
+                                            {extras.fineFgts40 > 0 && <tr><td className="py-0.5 px-2 uppercase">Multa 40% do FGTS (saldo acumulado + rescisão)</td><td className="py-0.5 px-2 text-right font-bold text-red-700">{formatCurrency(extras.fineFgts40)}</td></tr>}
+                                            {fgtsSelected && <tr><td className="py-0.5 px-2 uppercase">FGTS da rescisão (8%)</td><td className="py-0.5 px-2 text-right font-bold text-blue-700">{formatCurrency(fgtsValue)}</td></tr>}
+                                            {breach > 0 && <tr><td className="py-0.5 px-2 uppercase">Descumprimento CCT</td><td className="py-0.5 px-2 text-right font-bold text-purple-700">{formatCurrency(breach)}</td></tr>}
+                                            <tr className="font-black border-t border-black"><td className="py-1 px-2 uppercase">Total devido pelo atraso <span className="text-[9px] font-normal normal-case">(= colunas Valor Multa + 5.3 CCT + FGTS da linha acima)</span></td><td className="py-1 px-2 text-right">{formatCurrency(totalLate)}</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            );
+                        })}
                     </div>
                 );
             })}
@@ -866,9 +1189,13 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                 <span className="text-xl font-bold uppercase text-gray-700">Total Geral FGTS (Pendente):</span>
                 <span className="text-2xl font-black">{formatCurrency(grandTotalFgtsPending)}</span>
             </div>
+            <div className="flex justify-between items-center mb-2">
+                <span className="text-xl font-bold uppercase text-gray-700">Total Geral Descumprimento CCT (Pendente):</span>
+                <span className="text-2xl font-black">{formatCurrency(grandTotalBreachPending)}</span>
+            </div>
             <div className="flex justify-between items-center border-t border-gray-300 pt-2">
                 <span className="text-2xl font-black uppercase">Total Geral Devido:</span>
-                <span className="text-4xl font-black">{formatCurrency(grandTotalNet + grandTotalFinePending + grandTotalFgtsPending)}</span>
+                <span className="text-4xl font-black">{formatCurrency(grandTotalNet + grandTotalFinePending + grandTotalFgtsPending + grandTotalBreachPending)}</span>
             </div>
         </div>
     </div>

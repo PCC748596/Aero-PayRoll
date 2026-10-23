@@ -122,6 +122,7 @@ const App: React.FC = () => {
   const [dsrMultiplier, setDsrMultiplier] = useState(8);
   const [arrearsMap, setArrearsMap] = useState<Record<string, number>>({});
   const [arrearsFgtsMap, setArrearsFgtsMap] = useState<Record<string, boolean>>({}); 
+  const [arrearsVaMap, setArrearsVaMap] = useState<Record<string, boolean>>({}); // VA (vale alimentação) em atraso por competência
   const [arrearsPaidMap, setArrearsPaidMap] = useState<Record<string, boolean>>({}); // NEW: Track paid status
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [viewMode, setViewMode] = useState<'input' | 'payroll' | 'arrears'>('input');
@@ -203,6 +204,7 @@ const App: React.FC = () => {
                name: master.name,
                admissionDate: master.admissionDate,
                resignationDate: master.resignationDate,
+               terminationType: master.terminationType,
                role: master.role,
                vacationHistory: master.vacationHistory 
            };
@@ -476,6 +478,7 @@ const App: React.FC = () => {
         cctHistory, 
         arrears: arrearsMap,
         arrearsFgts: arrearsFgtsMap,
+        arrearsVa: arrearsVaMap,
         arrearsPaid: arrearsPaidMap, // Include new Paid map
         users,
         logs: currentLogs,
@@ -533,6 +536,13 @@ const App: React.FC = () => {
           const newKey = `${loadedDate.getFullYear()}-${loadedDate.getMonth()}`;
           if (sanitizedHistory[newKey]) {
               setEmployees(deepClone(sanitizedHistory[newKey]));
+          } else {
+              // Mês sem histórico: parte do último mês salvo, senão ficaria com os dados antigos da sessão (ex.: férias sem a correção do backup)
+              const latestKey = Object.keys(sanitizedHistory)
+                  .filter(k => { const [y, m] = k.split('-').map(Number); return y * 12 + m <= loadedDate.getFullYear() * 12 + loadedDate.getMonth(); })
+                  .sort((a, b) => { const [ay, am] = a.split('-').map(Number); const [by, bm] = b.split('-').map(Number); return (ay * 12 + am) - (by * 12 + bm); })
+                  .pop();
+              if (latestKey) setEmployees(getEmptyEmployees(deepClone(sanitizedHistory[latestKey])));
           }
         }
 
@@ -549,7 +559,7 @@ const App: React.FC = () => {
 
         if (data.arrears) setArrearsMap(data.arrears);
         if (data.arrearsFgts) setArrearsFgtsMap(data.arrearsFgts);
-        if (data.arrearsPaid) setArrearsPaidMap(data.arrearsPaid); // Load new map
+        setArrearsVaMap(data.arrearsVa || {});        if (data.arrearsPaid) setArrearsPaidMap(data.arrearsPaid); // Load new map
 
         // Load Users
         if (data.users && Array.isArray(data.users)) {
@@ -654,6 +664,14 @@ const App: React.FC = () => {
 
   const handleUpdateArrearFgts = (key: string, value: boolean) => {
       setArrearsFgtsMap(prev => ({
+          ...prev,
+          [key]: value
+      }));
+      setHasUnsavedChanges(true);
+  };
+
+  const handleUpdateArrearVa = (key: string, value: boolean) => {
+      setArrearsVaMap(prev => ({
           ...prev,
           [key]: value
       }));
@@ -828,7 +846,7 @@ const App: React.FC = () => {
   );
 
   return (
-    <div className={`min-h-screen pb-10 transition-colors duration-200 ${printMode ? 'print:pb-0 print:bg-white' : ''}`}>
+    <div className={`min-h-screen pb-10 print:min-h-0 print:pb-0 transition-colors duration-200 ${printMode ? 'print:bg-white' : ''}`}>
       
       {/* Wrapper to hide Main App content when Modals are printing OR Full Print Mode is active */}
       <div className={`${showBatchModal || showReportModal || printMode ? 'print:hidden' : ''}`}>
@@ -1124,6 +1142,7 @@ const App: React.FC = () => {
                             history={history}
                             arrearsMap={arrearsMap}
                             arrearsFgtsMap={arrearsFgtsMap} // Pass FGTS map
+                            arrearsVaMap={arrearsVaMap}                            onUpdateArrearVa={canEdit ? handleUpdateArrearVa : () => {}}
                             arrearsPaidMap={arrearsPaidMap} // Pass Paid map
                             onUpdateArrear={canEdit ? handleUpdateArrear : () => {}}
                             onUpdateArrearFgts={canEdit ? handleUpdateArrearFgts : () => {}} // Pass update function
@@ -1335,7 +1354,7 @@ const App: React.FC = () => {
                       <label className="block text-xs font-bold text-gray-500 dark:text-slate-400 uppercase mb-2">Tipo de Rescisão</label>
                       <div className="grid grid-cols-2 gap-2">
                           {/* Radio Buttons... keeping it concise, assume standard disabled logic applies */}
-                          {['PEDIDO_TRABALHADO', 'PEDIDO_INDENIZADO', 'DEMISSAO_TRABALHADA', 'DEMISSAO_INDENIZADA'].map(type => (
+                          {['PEDIDO_TRABALHADO', 'PEDIDO_INDENIZADO', 'DEMISSAO_TRABALHADA', 'DEMISSAO_INDENIZADA', 'JUSTA_CAUSA', 'ACORDO_484A', 'RESCISAO_INDIRETA', 'TERMINO_CONTRATO'].map(type => (
                               <label key={type} className={`flex items-center gap-2 cursor-pointer p-1 rounded hover:bg-gray-50 dark:hover:bg-slate-800/50 ${editingEmployee.terminationType === type ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}>
                                   <input 
                                       type="radio"
@@ -1345,7 +1364,7 @@ const App: React.FC = () => {
                                       disabled={!canEdit}
                                       className="text-blue-600 focus:ring-blue-500 w-4 h-4 bg-white dark:bg-slate-900 border-gray-300 dark:border-slate-700 cursor-pointer"
                                   />
-                                  <span className="text-[10px] text-slate-700 dark:text-slate-300 font-medium leading-tight">{type.replace('_', '/')}</span>
+                                  <span className="text-[10px] text-slate-700 dark:text-slate-300 font-medium leading-tight">{type.replace(/_/g, ' ')}</span>
                               </label>
                           ))}
                       </div>
