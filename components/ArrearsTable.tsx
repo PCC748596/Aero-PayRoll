@@ -1017,7 +1017,7 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
     {/* Impressão */}
     <div id="arrears-printable" className="hidden print:block w-full bg-white text-black p-8 font-sans">
         {/* Tabela de cada tripulante pode quebrar entre páginas (evita página em branco antes do 1º nome); linhas e cabeçalho do nome não se partem */}
-        <style>{`@media print { #arrears-printable tr { break-inside: avoid; } #arrears-printable thead { display: table-header-group; } #arrears-printable .emp-name { break-after: avoid; } }`}</style>
+        <style>{`@page { size: A4 portrait; margin: 8mm; } @media print { #arrears-printable { padding: 0 !important; max-width: none !important; width: 100% !important; } #arrears-printable .emp-block { padding: 8px !important; box-shadow: none !important; } #arrears-printable table { width: 100%; table-layout: auto; font-size: 9.5px; } #arrears-printable th, #arrears-printable td { padding: 2px 4px !important; } #arrears-printable tbody td:first-child { white-space: nowrap; } #arrears-printable tr { break-inside: avoid; } #arrears-printable thead { display: table-header-group; } #arrears-printable .emp-name { break-after: avoid; } #arrears-printable .emp-block + .emp-block { break-before: page; } }`}</style>
         <div className="text-center border-b-2 border-black pb-4 mb-6">
             <h1 className="text-2xl font-bold uppercase">Relatório de Cálculo de Atrasados</h1>
             <p className="text-sm text-gray-600">Referência: CCT 24-25 / CCT 25-26 (Multas + FGTS)</p>
@@ -1031,7 +1031,7 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                 if (!totalEmp || !hasActivity) return null;
                 
                 return (
-                    <div key={emp.id} className="border border-gray-300 rounded p-4 shadow-sm mb-4">
+                    <div key={emp.id} className="emp-block border border-gray-300 rounded p-4 shadow-sm mb-4">
                         <div className="emp-name flex justify-between items-center mb-3 bg-gray-100 p-2 rounded">
                             <span className="font-bold text-lg uppercase">{emp.name}</span>
                             <span className="text-sm font-semibold">{emp.role}</span>
