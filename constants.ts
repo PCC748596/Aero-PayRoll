@@ -475,7 +475,7 @@ export const getConfigForDate = (date: Date, customHistory?: CCTConfigData[]): G
      if ((year === 2023 && month >= 10) || (year === 2024 && month < 10)) {
          cctId = 'cct_23_24';
      } 
-     // CCT 22-23: Nov 22 to Oct 23
+     // CCT 22-23: Nov 22 to Oct 23 (competência). Mês de pagamento DEZ/22 já é CCT 22-23; até NOV/22 (pagamento) vale o salário inicial de R$ 9.400,00
      else if ((year === 2022 && month >= 10) || (year === 2023 && month < 10)) {
          cctId = 'cct_22_23';
      }
