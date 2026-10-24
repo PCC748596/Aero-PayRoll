@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Employee, CCTConfigData, Holiday, PayrollType } from '../types';
 import { calculateBusinessDays } from '../utils/calculationService';
+import { getEmptyEmployees } from '../constants';
 import { X, Printer, Search, Filter, Layers } from 'lucide-react';
 import Payslip from './Payslip';
 
@@ -89,7 +90,30 @@ const BatchPayslipModal: React.FC<BatchPayslipModalProps> = ({
               const histList = history[historyKey];
               empSnapshot = histList?.find(e => e.id === empId);
           }
-          
+
+          // Mês nunca salvo no histórico: usa o registro mais próximo do tripulante, sem horas variáveis,
+          // desde que ele já estivesse admitido na competência (mesmo que o app faz ao abrir um mês novo)
+          if (!empSnapshot) {
+              const target = y * 12 + m;
+              let nearest: Employee | undefined;
+              let bestDist = Infinity;
+              Object.keys(history).forEach(k => {
+                  const candidate = history[k]?.find(e => e.id === empId);
+                  if (!candidate) return;
+                  const [ky, km] = k.split('-').map(Number);
+                  const kv = ky * 12 + km;
+                  const dist = Math.abs(kv - target) + (kv > target ? 0.5 : 0); // empata a favor do mês anterior
+                  if (dist < bestDist) { bestDist = dist; nearest = candidate; }
+              });
+              if (nearest?.admissionDate) {
+                  const [ay, am] = nearest.admissionDate.split('-').map(Number);
+                  const competenceVal = y * 12 + (m - 1);
+                  if (ay * 12 + (am - 1) <= competenceVal) {
+                      empSnapshot = getEmptyEmployees([JSON.parse(JSON.stringify(nearest))])[0];
+                  }
+              }
+          }
+
           if (empSnapshot) {
               const paymentDate = new Date(y, m, 1); 
               const compYear = y;
