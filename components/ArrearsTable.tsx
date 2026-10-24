@@ -512,7 +512,7 @@ const ArrearsTable: React.FC<ArrearsTableProps> = ({
                     const iterDate = new Date(startY, startM - 1, 1);
                     const targetEnd = new Date(endY, endM - 1, 1);
                     let safety = 0;
-                    while(iterDate <= targetEnd && safety < 24) {
+                    while(iterDate <= targetEnd && safety < 12) {
                         const iYear = iterDate.getFullYear(), iMonth = iterDate.getMonth();
                         let pM = iMonth + 1;
                         let pY = iYear;

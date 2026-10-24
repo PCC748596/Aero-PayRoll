@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { Employee, Role } from '../types';
-import { ArrowUp, ArrowDown, ArrowUpDown, FileText, Search, Ban, Sun, Palmtree, UserX } from 'lucide-react';
+import { ArrowUp, ArrowDown, ArrowUpDown, FileText, Search, Ban, Sun, Palmtree, UserX, Umbrella } from 'lucide-react';
 
 interface InputGridProps {
   employees: Employee[];
@@ -446,41 +446,53 @@ const InputGrid: React.FC<InputGridProps> = ({ employees, onUpdateEmployee, onSe
                                  <Palmtree className="w-4 h-4" />
                                </button>
                            )}
-                           
-                           {/* Recibo de Férias - Mostra apenas no mês de início das férias */}
-                           {hasVacationStartingInCurrentMonth && (
-                               <button 
-                                 type="button"
-                                 onClick={() => onSelectForPayslip(emp, 'VACATION')}
-                                 className="p-1 rounded shadow-sm transition-all bg-teal-500 hover:bg-teal-600 text-white"
-                                 title="Gerar Recibo de Férias"
-                                >
-                                 <FileText className="w-4 h-4" />
-                               </button>
-                           )}
                        </div>
                    )}
 
-                   {/* Botão Mensal Padrão OU Rescisão - Agora sempre visível */}
-                   <button 
-                     type="button"
-                     onClick={() => !payslipStatus.disabled && onSelectForPayslip(emp, payslipStatus.isTermination ? 'TERMINATION' : 'MONTHLY')}
-                     disabled={payslipStatus.disabled}
-                     className={`p-1 rounded shadow-sm transition-all ${
-                         payslipStatus.isTermination
-                         ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse'
-                         : payslipStatus.disabled 
-                             ? 'bg-gray-200 dark:bg-slate-800 text-gray-400 dark:text-slate-600 cursor-not-allowed' 
-                             : 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-700 dark:hover:bg-blue-600 text-white'
-                     }`}
-                     title={payslipStatus.disabled ? `Indisponível: ${payslipStatus.reason}` : (payslipStatus.isTermination ? "Gerar Rescisão" : "Gerar Holerite Mensal")}
-                   >
-                     {payslipStatus.isTermination ? (
-                         <UserX className="w-4 h-4" />
-                     ) : (
-                         payslipStatus.disabled ? <Ban className="w-4 h-4" /> : <FileText className="w-4 h-4" />
-                     )}
-                   </button>
+                   {/* Contracheques: um ícone para cada tipo (mensal, férias, rescisão), sempre visíveis; ficam apagados quando não se aplicam ao mês */}
+                   {(() => {
+                       const monthlyDisabled = payslipStatus.disabled || payslipStatus.isTermination;
+                       const monthlyReason = payslipStatus.isTermination
+                           ? 'Mês de rescisão: use o ícone de rescisão'
+                           : payslipStatus.reason;
+                       const vacationDisabled = !hasVacationStartingInCurrentMonth;
+                       const terminationDisabled = !payslipStatus.isTermination;
+                       const disabledClass = 'bg-gray-200 dark:bg-slate-800 text-gray-400 dark:text-slate-600 cursor-not-allowed';
+
+                       return (
+                           <>
+                               <button
+                                 type="button"
+                                 onClick={() => !monthlyDisabled && onSelectForPayslip(emp, 'MONTHLY')}
+                                 disabled={monthlyDisabled}
+                                 className={`p-1 rounded shadow-sm transition-all ${monthlyDisabled ? disabledClass : 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-700 dark:hover:bg-blue-600 text-white'}`}
+                                 title={monthlyDisabled ? `Contracheque do mês indisponível: ${monthlyReason}` : 'Contracheque do mês'}
+                               >
+                                 {monthlyDisabled ? <Ban className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
+                               </button>
+
+                               <button
+                                 type="button"
+                                 onClick={() => !vacationDisabled && onSelectForPayslip(emp, 'VACATION')}
+                                 disabled={vacationDisabled}
+                                 className={`p-1 rounded shadow-sm transition-all ${vacationDisabled ? disabledClass : 'bg-teal-500 hover:bg-teal-600 text-white'}`}
+                                 title={vacationDisabled ? 'Recibo de férias indisponível: nenhuma férias começa neste mês' : 'Recibo de férias'}
+                               >
+                                 <Umbrella className="w-4 h-4" />
+                               </button>
+
+                               <button
+                                 type="button"
+                                 onClick={() => !terminationDisabled && onSelectForPayslip(emp, 'TERMINATION')}
+                                 disabled={terminationDisabled}
+                                 className={`p-1 rounded shadow-sm transition-all ${terminationDisabled ? disabledClass : 'bg-red-600 hover:bg-red-700 text-white animate-pulse'}`}
+                                 title={terminationDisabled ? 'Rescisão indisponível: só no mês de pagamento da rescisão (desligamento + 2)' : 'Termo de rescisão'}
+                               >
+                                 <UserX className="w-4 h-4" />
+                               </button>
+                           </>
+                       );
+                   })()}
                  </div>
               </td>
             </tr>

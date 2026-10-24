@@ -14,6 +14,9 @@ interface BatchPayslipModalProps {
   customHolidays: Holiday[];
   manualBusinessDays: number; // Value from App state
   currentPaymentDate: Date;   // Value from App state
+  initialEmpId?: string;      // Pré-seleção vinda do Relatório Financeiro
+  initialStart?: string;      // YYYY-MM (mês de pagamento)
+  initialEnd?: string;        // YYYY-MM (mês de pagamento)
 }
 
 interface BatchItem {
@@ -25,7 +28,8 @@ interface BatchItem {
 }
 
 const BatchPayslipModal: React.FC<BatchPayslipModalProps> = ({
-  isOpen, onClose, employees, history, cctHistory, ignoredHolidays, customHolidays, manualBusinessDays, currentPaymentDate
+  isOpen, onClose, employees, history, cctHistory, ignoredHolidays, customHolidays, manualBusinessDays, currentPaymentDate,
+  initialEmpId, initialStart, initialEnd
 }) => {
   const [selectedEmpId, setSelectedEmpId] = useState<string>('');
   const [startPeriod, setStartPeriod] = useState<string>(''); // YYYY-MM
@@ -44,11 +48,22 @@ const BatchPayslipModal: React.FC<BatchPayslipModalProps> = ({
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
   }, [employees, history]);
 
-  const handleGenerate = () => {
-      if (!selectedEmpId || !startPeriod || !endPeriod) return;
+  const handleGenerate = () => generateBatch(selectedEmpId, startPeriod, endPeriod);
 
-      const [startY, startM] = startPeriod.split('-').map(Number);
-      const [endY, endM] = endPeriod.split('-').map(Number);
+  // Quando aberto pelo Relatório Financeiro, já vem com tripulante e período preenchidos e gera a visualização
+  useEffect(() => {
+      if (!isOpen || !initialEmpId || !initialStart || !initialEnd) return;
+      setSelectedEmpId(initialEmpId);
+      setStartPeriod(initialStart);
+      setEndPeriod(initialEnd);
+      generateBatch(initialEmpId, initialStart, initialEnd);
+  }, [isOpen, initialEmpId, initialStart, initialEnd]);
+
+  const generateBatch = (empId: string, startP: string, endP: string) => {
+      if (!empId || !startP || !endP) return;
+
+      const [startY, startM] = startP.split('-').map(Number);
+      const [endY, endM] = endP.split('-').map(Number);
 
       const startDate = new Date(startY, startM - 1, 1);
       const endDate = new Date(endY, endM - 1, 1);
@@ -69,10 +84,10 @@ const BatchPayslipModal: React.FC<BatchPayslipModalProps> = ({
           let empSnapshot: Employee | undefined;
           
           if (isCurrentContext) {
-              empSnapshot = employees.find(e => e.id === selectedEmpId);
+              empSnapshot = employees.find(e => e.id === empId);
           } else {
               const histList = history[historyKey];
-              empSnapshot = histList?.find(e => e.id === selectedEmpId);
+              empSnapshot = histList?.find(e => e.id === empId);
           }
           
           if (empSnapshot) {
@@ -157,23 +172,58 @@ const BatchPayslipModal: React.FC<BatchPayslipModalProps> = ({
                   }
               }
 
-              // 3. Vacation
-              if (canGenerateExtras && empSnapshot.vacationStartDate) {
-                  const [vY, vM] = empSnapshot.vacationStartDate.split('-').map(Number);
-                  if (vY === y && vM === (m + 1)) {
-                       items.push({
-                          id: `vacation-${y}-${m}`,
-                          employee: empSnapshot, 
-                          date: paymentDate,
-                          payrollType: 'VACATION',
-                          businessDays: 0 
-                       });
-                  }
+              // 3. Vacation: um recibo para cada férias do histórico que começa neste mês (e a vigente, se não estiver no histórico)
+              if (canGenerateExtras) {
+                  const vacationStarts = new Set<string>();
+                  (empSnapshot.vacationHistory || []).forEach(v => vacationStarts.add(v.startDate));
+                  if (empSnapshot.vacationStartDate) vacationStarts.add(empSnapshot.vacationStartDate);
+
+                  vacationStarts.forEach(startDate => {
+                      const [vY, vM] = startDate.split('-').map(Number);
+                      if (vY === y && vM === (m + 1)) {
+                          items.push({
+                              id: `vacation-${startDate}`,
+                              employee: empSnapshot as Employee,
+                              date: paymentDate,
+                              payrollType: 'VACATION',
+                              businessDays: 0
+                          });
+                      }
+                  });
               }
           }
 
           ptr.setMonth(ptr.getMonth() + 1);
       }
+
+      // 4. Rescisão: se o desligamento cai no período, o termo de rescisão entra mesmo que o mês de pagamento (desligamento + 2) seja depois do fim
+      const anySnapshot = employees.find(e => e.id === empId) || (Object.values(history) as Employee[][]).flat().find(e => e.id === empId);
+      if (anySnapshot?.resignationDate) {
+          const [rY, rM] = anySnapshot.resignationDate.split('-').map(Number);
+          const resAbs = rY * 12 + (rM - 1);
+          const startAbs = startY * 12 + (startM - 1);
+          const endAbs = endY * 12 + (endM - 1);
+          const payAbs = resAbs + 2;
+          const termId = `termination-${Math.floor(payAbs / 12)}-${payAbs % 12}`;
+          const inPeriod = resAbs >= startAbs - 1 && resAbs <= endAbs;
+          if (inPeriod && !items.some(i => i.id === termId)) {
+              const payY = Math.floor(payAbs / 12);
+              const payM = payAbs % 12;
+              const payKey = `${payY}-${payM}`;
+              const isCurrent = payY === currentPaymentDate.getFullYear() && payM === currentPaymentDate.getMonth();
+              const termSnapshot = (isCurrent ? employees.find(e => e.id === empId) : history[payKey]?.find(e => e.id === empId)) || anySnapshot;
+              items.push({
+                  id: termId,
+                  employee: termSnapshot,
+                  date: new Date(payY, payM, 1),
+                  payrollType: 'TERMINATION',
+                  businessDays: isCurrent ? manualBusinessDays : calculateBusinessDays(payY, payM - 1, ignoredHolidays, customHolidays).businessDays
+              });
+          }
+      }
+
+      // Ordem cronológica de pagamento (a rescisão pode ter sido adicionada no fim)
+      items.sort((a, b) => a.date.getTime() - b.date.getTime());
       setGeneratedBatch(items);
   };
 
@@ -185,7 +235,7 @@ const BatchPayslipModal: React.FC<BatchPayslipModalProps> = ({
 
   return (
     // CRITICAL FIX: print:!bg-white print:!text-black print:min-h-screen
-    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4 print:p-0 print:!bg-white print:!text-black print:absolute print:top-0 print:left-0 print:w-full print:h-full print:block">
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4 print:p-0 print:!bg-white print:!text-black print:static print:w-full print:h-auto print:block">
       <div className="bg-white dark:bg-slate-900 w-full max-w-5xl max-h-[90vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden border border-slate-200 dark:border-slate-800 print:shadow-none print:border-none print:max-w-none print:max-h-none print:w-full print:h-auto print:overflow-visible print:block print:!bg-white print:!text-black">
         
         {/* Header - No Print */}
@@ -205,7 +255,7 @@ const BatchPayslipModal: React.FC<BatchPayslipModalProps> = ({
         </div>
 
         {/* Content */}
-        <div className="flex-1 flex flex-col overflow-hidden print:overflow-visible print:block print:!bg-white">
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden print:overflow-visible print:block print:!bg-white">
             
             {/* Controls - No Print */}
             <div className="p-4 bg-gray-100 dark:bg-slate-900 border-b border-gray-200 dark:border-slate-800 flex flex-wrap gap-4 items-end print:hidden">
@@ -254,9 +304,14 @@ const BatchPayslipModal: React.FC<BatchPayslipModalProps> = ({
             </div>
 
             {/* Preview Area */}
-            <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-slate-950 p-6 print:p-0 print:overflow-visible print:!bg-white">
+            <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50 dark:bg-slate-950 p-6 print:p-0 print:overflow-visible print:!bg-white">
                 {generatedBatch ? (
                     <div id="batch-print-container" className="flex flex-col gap-8 print:block print:gap-0">
+                        {generatedBatch.length > 0 && (
+                            <div className="print:hidden text-xs font-bold text-gray-500 dark:text-slate-400 uppercase">
+                                {generatedBatch.length} contracheque(s) no período: {generatedBatch.map(i => `${i.payrollType === 'MONTHLY' ? '' : i.payrollType + ' '}${String(i.date.getMonth() + 1).padStart(2, '0')}/${i.date.getFullYear()}`).join(' · ')}
+                            </div>
+                        )}
                         {generatedBatch.length === 0 && (
                             <div className="text-center text-gray-500 py-10">Nenhum holerite encontrado para o período selecionado.</div>
                         )}

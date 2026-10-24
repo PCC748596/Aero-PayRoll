@@ -132,6 +132,7 @@ const App: React.FC = () => {
   const [showHolidayManager, setShowHolidayManager] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [showBatchModal, setShowBatchModal] = useState(false);
+  const [batchPreset, setBatchPreset] = useState<{ empId: string, start: string, end: string } | null>(null);
   
   const [globalConfig, setGlobalConfig] = useState<GlobalConfig>(INITIAL_CONFIG);
   const [newEmpName, setNewEmpName] = useState('');
@@ -1427,11 +1428,19 @@ const App: React.FC = () => {
          cctHistory={cctHistory}
          ignoredHolidays={ignoredHolidays}
          customHolidays={customHolidays}
+         onPrintPayslips={(empId, start, end) => {
+             setBatchPreset({ empId, start, end });
+             setShowReportModal(false);
+             setShowBatchModal(true);
+         }}
       />
 
-      <BatchPayslipModal 
+      <BatchPayslipModal
         isOpen={showBatchModal}
-        onClose={() => setShowBatchModal(false)}
+        onClose={() => { setShowBatchModal(false); setBatchPreset(null); }}
+        initialEmpId={batchPreset?.empId}
+        initialStart={batchPreset?.start}
+        initialEnd={batchPreset?.end}
         employees={employees}
         history={history}
         cctHistory={cctHistory}

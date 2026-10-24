@@ -15,10 +15,12 @@ interface ReportModalProps {
   cctHistory: CCTConfigData[];
   ignoredHolidays: string[];
   customHolidays: Holiday[];
+  // Abre a impressão de contracheques do mesmo tripulante e período (meses de pagamento, YYYY-MM)
+  onPrintPayslips?: (empId: string, startPayment: string, endPayment: string) => void;
 }
 
 export const ReportModal: React.FC<ReportModalProps> = ({
-  isOpen, onClose, employees, history, arrearsMap, arrearsFgtsMap, cctHistory, ignoredHolidays, customHolidays
+  isOpen, onClose, employees, history, arrearsMap, arrearsFgtsMap, cctHistory, ignoredHolidays, customHolidays, onPrintPayslips
 }) => {
   const [selectedEmpId, setSelectedEmpId] = useState<string>('');
   const [startPeriod, setStartPeriod] = useState<string>(''); // YYYY-MM
@@ -241,6 +243,17 @@ export const ReportModal: React.FC<ReportModalProps> = ({
       window.print();
   };
 
+  // O relatório usa a competência; os contracheques são gerados pelo mês de pagamento (competência + 1)
+  const handlePrintPayslips = () => {
+      if (!onPrintPayslips || !selectedEmpId || !startPeriod || !endPeriod) return;
+      const toPayment = (period: string) => {
+          const [y, m] = period.split('-').map(Number);
+          const d = new Date(y, m, 1); // m é 1-based, então new Date(y, m, 1) já é o mês seguinte
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      };
+      onPrintPayslips(selectedEmpId, toPayment(startPeriod), toPayment(endPeriod));
+  };
+
   const totals = useMemo(() => {
       if (!reportData) return null;
       return reportData.reduce((acc, curr) => ({
@@ -323,6 +336,17 @@ export const ReportModal: React.FC<ReportModalProps> = ({
                         <Filter className="w-4 h-4" />
                         Gerar
                     </button>
+                    {onPrintPayslips && (
+                        <button
+                            onClick={handlePrintPayslips}
+                            disabled={!selectedEmpId || !startPeriod || !endPeriod}
+                            title="Abre a impressão dos contracheques de cada mês do período (mensal, 13º, férias e rescisão)"
+                            className="px-6 py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-bold shadow-sm transition-colors flex items-center gap-2"
+                        >
+                            <Printer className="w-4 h-4" />
+                            Imprimir Contracheques
+                        </button>
+                    )}
                 </div>
                 
                 <div className="flex items-center gap-2 pt-2 border-t border-gray-200 dark:border-slate-800">
